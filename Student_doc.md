@@ -2,11 +2,15 @@
 
 ## Architettura deployata
 
-*(Da aggiornare durante lo sviluppo.)*
+- **Simulatore** (8080): sensori WebSocket + SSE control.
+- **Broker**: fan-out verso le repliche processing.
+- **Processing ×2**: FFT/classificazione + scrittura su **PostgreSQL** con `dedup_key` unica.
+- **PostgreSQL**: tabella `detected_events` (nessun DB embedded).
+- **Gateway** (8090): lettura eventi per il futuro dashboard (`GET /api/events`).
 
 ## Servizi
 
-*(Broker, processing, gateway, database, frontend.)*
+Simulatore, broker, `processing-1`, `processing-2`, `db`, `gateway`. Frontend da aggiungere.
 
 ## Passo 1 — Teoria: cos’è il broker e perché parte da qui
 
@@ -49,9 +53,24 @@ Serve a:
 - `source/processing/` — API ingest + health + SSE + FFT.
 - `source/broker/app.py` — fan-out verso `processing-1` e `processing-2`.
 
+## Passo 3 — Persistenza e gateway
+
+### Teoria
+
+- Due repliche possono calcolare **lo stesso evento** a partire dagli stessi campioni. Serve un **dedup** deterministico:  
+  `sha256(sensor_id | classificazione | freq arrotondata | timestamp dell’ultimo campione nella finestra)`.  
+  Unico vincolo `UNIQUE(dedup_key)` + `INSERT ... ON CONFLICT DO NOTHING` → una sola riga in DB.
+- **Gateway**: punto d’ingresso unico per **leggere** gli eventi (il lab richiede anche routing/health verso le repliche; qui espone già lista eventi e health sul DB).
+
+### File
+
+- `source/db/init.sql` — schema PostgreSQL.
+- `source/gateway/` — API lettura eventi.
+
 ## Note operative
 
 - Simulatore: `http://localhost:8080` (vedi `source/docker-compose.yml` e `source/scripts/load-simulator-oci.sh`).
 - Repliche: `http://localhost:8001` e `http://localhost:8002` (porte host mappate).
-- Debug eventi classificati: `GET http://localhost:8001/internal/recent-events` (e analogo su 8002).
+- Gateway: `http://localhost:8090/health`, `http://localhost:8090/api/events`.
+- Debug eventi in memoria: `GET http://localhost:8001/internal/recent-events` (e analogo su 8002).
 - Se il broker va in errore `keepalive ping timeout` su molti sensori: per default i **ping inviati dal client WebSocket sono disattivi** (`WS_PING_INTERVAL` / `WS_PING_TIMEOUT` vuoti); il traffico campioni mantiene la connessione. Riattiva i ping solo se serve, es. `WS_PING_INTERVAL=60`.

@@ -5,6 +5,25 @@
 # registrati in DNS sulla rete compose (altrimenti: "Name or service not known").
 
 services:
+  db:
+    image: postgres:16-alpine
+    container_name: seismic-db
+    environment:
+      POSTGRES_USER: seismic
+      POSTGRES_PASSWORD: seismic
+      POSTGRES_DB: seismic
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U seismic -d seismic"]
+      interval: 3s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
   simulator:
     image: seismic-signal-simulator:multiarch_v1
     container_name: seismic-simulator
@@ -24,6 +43,7 @@ services:
       SIMULATOR_BASE_URL: http://simulator:8080
       SAMPLING_RATE_HZ: "20"
       PORT: "8000"
+      DATABASE_URL: postgresql://seismic:seismic@db:5432/seismic
     ports:
       - "8001:8000"
     healthcheck:
@@ -39,7 +59,10 @@ services:
       retries: 10
       start_period: 15s
     depends_on:
-      - simulator
+      simulator:
+        condition: service_started
+      db:
+        condition: service_healthy
 
   processing-2:
     build: ./processing
@@ -49,6 +72,7 @@ services:
       SIMULATOR_BASE_URL: http://simulator:8080
       SAMPLING_RATE_HZ: "20"
       PORT: "8000"
+      DATABASE_URL: postgresql://seismic:seismic@db:5432/seismic
     ports:
       - "8002:8000"
     healthcheck:
@@ -64,7 +88,22 @@ services:
       retries: 10
       start_period: 15s
     depends_on:
-      - simulator
+      simulator:
+        condition: service_started
+      db:
+        condition: service_healthy
+
+  gateway:
+    build: ./gateway
+    container_name: seismic-gateway
+    environment:
+      DATABASE_URL: postgresql://seismic:seismic@db:5432/seismic
+      PORT: "8090"
+    ports:
+      - "8090:8090"
+    depends_on:
+      db:
+        condition: service_healthy
 
   broker:
     build: ./broker
@@ -82,3 +121,6 @@ services:
         condition: service_healthy
       processing-2:
         condition: service_healthy
+
+volumes:
+  pgdata:

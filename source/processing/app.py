@@ -1,11 +1,13 @@
 """
 Replica di processing: ingestisce campioni dal broker, finestra scorrevole,
-FFT, classificazione per bande di frequenza, stream di controllo SSE dal simulatore.
+FFT, classificazione, persistenza idempotente su PostgreSQL (dedup_key),
+stream di controllo SSE dal simulatore.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -16,10 +18,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+import asyncpg
 import httpx
 import numpy as np
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 LOG = logging.getLogger("processing")
 
@@ -27,8 +30,10 @@ SIMULATOR_BASE = os.environ.get("SIMULATOR_BASE_URL", "http://localhost:8080").r
 REPLICA_ID = os.environ.get("REPLICA_ID", "1")
 SAMPLING_RATE_HZ = float(os.environ.get("SAMPLING_RATE_HZ", "20"))
 WINDOW_SIZE = int(os.environ.get("WINDOW_SIZE", "128"))
-# Soglia minima energia (somma |FFT|^2 normalizzata) per considerare un picco valido
 ENERGY_THRESHOLD = float(os.environ.get("ENERGY_THRESHOLD", "0"))
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+
+pool: asyncpg.Pool | None = None
 
 
 class IngestBody(BaseModel):
@@ -39,12 +44,20 @@ class IngestBody(BaseModel):
 
 @dataclass
 class ReplicaState:
-    windows: dict[str, deque[float]] = field(default_factory=dict)
-    # Ultimi eventi rilevati (per debug / futura API dashboard)
+    # (valore, timestamp ISO del campione dal simulatore)
+    windows: dict[str, deque[tuple[float, str]]] = field(default_factory=dict)
     recent_events: list[dict[str, Any]] = field(default_factory=list)
 
 
 state = ReplicaState()
+
+
+def make_dedup_key(
+    sensor_id: str, classification: str, dom_freq: float, anchor_ts: str
+) -> str:
+    """Stessa finestra + stessi parametri → stessa chiave (repliche duplicate-safe)."""
+    s = f"{sensor_id}|{classification}|{round(dom_freq, 4)}|{anchor_ts}"
+    return hashlib.sha256(s.encode()).hexdigest()
 
 
 def classify_dominant_freq_hz(freq_hz: float) -> str:
@@ -60,7 +73,6 @@ def classify_dominant_freq_hz(freq_hz: float) -> str:
 
 
 def analyze_window(samples: list[float], fs: float) -> tuple[float | None, float]:
-    """Restituisce (frequenza dominante Hz, energia totale spettrale)."""
     x = np.asarray(samples, dtype=np.float64)
     n = len(x)
     if n < 8:
@@ -69,7 +81,6 @@ def analyze_window(samples: list[float], fs: float) -> tuple[float | None, float
     spec = np.fft.rfft(x)
     power = (np.abs(spec) ** 2).astype(np.float64)
     freqs = np.fft.rfftfreq(n, d=1.0 / fs)
-    # ignora DC
     if len(power) <= 1:
         return None, 0.0
     k = int(np.argmax(power[1:]) + 1)
@@ -77,35 +88,61 @@ def analyze_window(samples: list[float], fs: float) -> tuple[float | None, float
     return float(freqs[k]), energy
 
 
-def process_sample(sensor_id: str, value: float) -> None:
+def process_sample(sensor_id: str, value: float, sample_ts: str) -> dict[str, Any] | None:
     if sensor_id not in state.windows:
         state.windows[sensor_id] = deque(maxlen=WINDOW_SIZE)
     w = state.windows[sensor_id]
-    w.append(value)
+    w.append((value, sample_ts))
     if len(w) < WINDOW_SIZE:
-        return
-    dom_freq, energy = analyze_window(list(w), SAMPLING_RATE_HZ)
+        return None
+    values = [t[0] for t in w]
+    anchor_ts = w[-1][1]
+    dom_freq, energy = analyze_window(values, SAMPLING_RATE_HZ)
     if dom_freq is None or energy < ENERGY_THRESHOLD:
-        return
+        return None
     label = classify_dominant_freq_hz(dom_freq)
     if label == "below_band":
-        return
+        return None
+    dedup_key = make_dedup_key(sensor_id, label, dom_freq, anchor_ts)
     evt = {
+        "dedup_key": dedup_key,
         "replica_id": REPLICA_ID,
         "sensor_id": sensor_id,
         "dominant_frequency_hz": round(dom_freq, 4),
         "energy": round(energy, 8),
         "classification": label,
-        "detected_at": datetime.now(timezone.utc).isoformat(),
+        "detected_at": anchor_ts,
     }
     state.recent_events.append(evt)
     if len(state.recent_events) > 500:
         state.recent_events = state.recent_events[-250:]
     LOG.info("EVENT %s", evt)
+    return evt
+
+
+async def persist_event(p: asyncpg.Pool, evt: dict[str, Any]) -> None:
+    """INSERT idempotente: seconda replica che calcola lo stesso evento viene ignorata."""
+    sql = """
+        INSERT INTO detected_events (
+            dedup_key, sensor_id, classification, dominant_frequency_hz,
+            energy, detected_at, replica_id
+        )
+        VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7)
+        ON CONFLICT (dedup_key) DO NOTHING
+    """
+    await p.execute(
+        sql,
+        evt["dedup_key"],
+        evt["sensor_id"],
+        evt["classification"],
+        evt["dominant_frequency_hz"],
+        evt["energy"],
+        evt["detected_at"],
+        evt["replica_id"],
+    )
 
 
 async def sse_control_loop() -> None:
-    """Ascolta /api/control; su SHUTDOWN termina il processo (replica simulata)."""
     url = f"{SIMULATOR_BASE}/api/control"
     LOG.info("REPLICA %s: connessione SSE %s", REPLICA_ID, url)
     while True:
@@ -142,6 +179,12 @@ async def sse_control_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global pool
+    if DATABASE_URL:
+        pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3)
+        LOG.info("Pool PostgreSQL disponibile")
+    else:
+        LOG.warning("DATABASE_URL assente — nessuna persistenza su DB")
     task = asyncio.create_task(sse_control_loop())
     yield
     task.cancel()
@@ -149,6 +192,9 @@ async def lifespan(app: FastAPI):
         await task
     except asyncio.CancelledError:
         pass
+    if pool:
+        await pool.close()
+        pool = None
 
 
 app = FastAPI(title=f"Processing replica {REPLICA_ID}", lifespan=lifespan)
@@ -162,13 +208,16 @@ def health() -> dict[str, Any]:
         "window_size": WINDOW_SIZE,
         "sampling_rate_hz": SAMPLING_RATE_HZ,
         "sensors_tracked": len(state.windows),
+        "persistence": bool(DATABASE_URL),
     }
 
 
 @app.post("/internal/ingest")
 async def ingest(body: IngestBody) -> dict[str, str]:
     try:
-        process_sample(body.sensor_id, body.value)
+        evt = process_sample(body.sensor_id, body.value, body.timestamp)
+        if evt and pool:
+            await persist_event(pool, evt)
     except Exception as e:
         LOG.exception("ingest error: %s", e)
         raise HTTPException(status_code=500, detail="internal error") from e
@@ -177,7 +226,6 @@ async def ingest(body: IngestBody) -> dict[str, str]:
 
 @app.get("/internal/recent-events")
 def recent_events() -> list[dict[str, Any]]:
-    """Endpoint di debug per vedere cosa ha classificato questa replica."""
     return list(state.recent_events[-50:])
 
 
