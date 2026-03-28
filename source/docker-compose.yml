@@ -1,5 +1,8 @@
 # Avvio: cd source && docker compose up --build
 # Simulatore: richiede immagine locale (scripts/load-simulator-oci.sh)
+#
+# Healthcheck: evita che il broker parta prima che processing-1/2 siano
+# registrati in DNS sulla rete compose (altrimenti: "Name or service not known").
 
 services:
   simulator:
@@ -23,6 +26,18 @@ services:
       PORT: "8000"
     ports:
       - "8001:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)",
+        ]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
     depends_on:
       - simulator
 
@@ -36,6 +51,18 @@ services:
       PORT: "8000"
     ports:
       - "8002:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)",
+        ]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
     depends_on:
       - simulator
 
@@ -49,6 +76,9 @@ services:
       MAX_SAMPLES: "0"
       LOG_LEVEL: INFO
     depends_on:
-      - simulator
-      - processing-1
-      - processing-2
+      simulator:
+        condition: service_started
+      processing-1:
+        condition: service_healthy
+      processing-2:
+        condition: service_healthy
