@@ -19,9 +19,23 @@ from websockets.exceptions import ConnectionClosed
 
 LOG = logging.getLogger("broker")
 
-# Keepalive: con molti sensori + fan-out, il client può non rispondere ai ping in tempo.
-WS_PING_INTERVAL = int(os.environ.get("WS_PING_INTERVAL", "30"))
-WS_PING_TIMEOUT = int(os.environ.get("WS_PING_TIMEOUT", "120"))
+
+def _env_optional_float(name: str, default: str | None) -> float | None:
+    """Se default è None e la var non è impostata → None (disattiva opzione)."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return None if default is None else float(default)
+    s = raw.strip().lower()
+    if s in ("", "none", "off", "disable", "false", "0"):
+        return None
+    return float(raw)
+
+
+# Con 12 WebSocket + fan-out HTTP, l’event loop può ritardare i ping del *client*:
+# la libreria chiude con "keepalive ping timeout". Default: nessun ping inviato dal
+# client (il flusso di campioni tiene viva la connessione). Riattiva con WS_PING_INTERVAL=30
+WS_PING_INTERVAL = _env_optional_float("WS_PING_INTERVAL", None)
+WS_PING_TIMEOUT = _env_optional_float("WS_PING_TIMEOUT", None)
 
 SIMULATOR_BASE = os.environ.get("SIMULATOR_BASE_URL", "http://localhost:8080").rstrip("/")
 MAX_SAMPLES = int(os.environ.get("MAX_SAMPLES", "0"))
@@ -86,11 +100,11 @@ async def read_sensor_stream(
     LOG.info("WS %s (%s)", uri, label)
     n_total = 0
     backoff = 1
-    connect_kw = {
-        "ping_interval": WS_PING_INTERVAL,
-        "ping_timeout": WS_PING_TIMEOUT,
-        "close_timeout": 10,
-    }
+    connect_kw: dict[str, Any] = {"close_timeout": 10}
+    if WS_PING_INTERVAL is not None:
+        connect_kw["ping_interval"] = WS_PING_INTERVAL
+    if WS_PING_TIMEOUT is not None:
+        connect_kw["ping_timeout"] = WS_PING_TIMEOUT
     while True:
         try:
             async with websockets.connect(uri, **connect_kw) as ws:

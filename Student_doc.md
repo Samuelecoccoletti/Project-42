@@ -54,3 +54,4 @@ Serve a:
 - Simulatore: `http://localhost:8080` (vedi `source/docker-compose.yml` e `source/scripts/load-simulator-oci.sh`).
 - Repliche: `http://localhost:8001` e `http://localhost:8002` (porte host mappate).
 - Debug eventi classificati: `GET http://localhost:8001/internal/recent-events` (e analogo su 8002).
+- Se il broker va in errore `keepalive ping timeout` su molti sensori: per default i **ping inviati dal client WebSocket sono disattivi** (`WS_PING_INTERVAL` / `WS_PING_TIMEOUT` vuoti); il traffico campioni mantiene la connessione. Riattiva i ping solo se serve, es. `WS_PING_INTERVAL=60`.
