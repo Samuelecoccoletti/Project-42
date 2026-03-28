@@ -15,8 +15,13 @@ from typing import Any
 
 import httpx
 import websockets
+from websockets.exceptions import ConnectionClosed
 
 LOG = logging.getLogger("broker")
+
+# Keepalive: con molti sensori + fan-out, il client può non rispondere ai ping in tempo.
+WS_PING_INTERVAL = int(os.environ.get("WS_PING_INTERVAL", "30"))
+WS_PING_TIMEOUT = int(os.environ.get("WS_PING_TIMEOUT", "120"))
 
 SIMULATOR_BASE = os.environ.get("SIMULATOR_BASE_URL", "http://localhost:8080").rstrip("/")
 MAX_SAMPLES = int(os.environ.get("MAX_SAMPLES", "0"))
@@ -79,19 +84,36 @@ async def read_sensor_stream(
     ws_base = http_to_ws_base(SIMULATOR_BASE)
     uri = f"{ws_base}{ws_path}" if ws_path.startswith("/") else f"{ws_base}/{ws_path}"
     LOG.info("WS %s (%s)", uri, label)
-    async with websockets.connect(uri) as ws:
-        n = 0
-        while True:
-            raw = await ws.recv()
-            payload = json.loads(raw)
-            n += 1
-            if PROCESSING_URLS:
-                await fan_out(http_client, sensor_id, payload)
-            else:
-                LOG.info("[%s] %s", label, payload)
-            if MAX_SAMPLES and n >= MAX_SAMPLES:
-                LOG.info("MAX_SAMPLES=%s raggiunto per %s", MAX_SAMPLES, label)
-                break
+    n_total = 0
+    backoff = 1
+    connect_kw = {
+        "ping_interval": WS_PING_INTERVAL,
+        "ping_timeout": WS_PING_TIMEOUT,
+        "close_timeout": 10,
+    }
+    while True:
+        try:
+            async with websockets.connect(uri, **connect_kw) as ws:
+                backoff = 1
+                while True:
+                    raw = await ws.recv()
+                    payload = json.loads(raw)
+                    n_total += 1
+                    if PROCESSING_URLS:
+                        await fan_out(http_client, sensor_id, payload)
+                    else:
+                        LOG.info("[%s] %s", label, payload)
+                    if MAX_SAMPLES and n_total >= MAX_SAMPLES:
+                        LOG.info("MAX_SAMPLES=%s raggiunto per %s", MAX_SAMPLES, label)
+                        return
+        except ConnectionClosed as e:
+            LOG.warning(
+                "WS %s chiuso (%s), riconnessione tra %ss...", label, e, backoff
+            )
+        except OSError as e:
+            LOG.warning("%s errore rete (%s), retry tra %ss...", label, e, backoff)
+        await asyncio.sleep(backoff)
+        backoff = min(backoff * 2, 60)
 
 
 async def main() -> None:
