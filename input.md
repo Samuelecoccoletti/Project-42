@@ -14,57 +14,25 @@ The system uses a **distributed architecture**: a **neutral broker** receives da
 
 ---
 
-# USER STORIES
+# USER STORIES 
 
-Each item starts with its id on the same line as the story text. Priorities are summarised in the table after the list.
-
-**US-01** — As the **broker (ingestion component)**, I want to open WebSocket connections to each sensor stream exposed by the simulator so that real-time ground-vibration samples are received continuously for downstream processing.
-
-**US-02** — As a **neutral broker**, I want to forward incoming samples to multiple processing nodes so that intelligence is not analysed in the neutral routing tier.
-
-**US-03** — As a **data analyst**, I want the system to compute the dominant frequency with FFT so that the nature of the vibration can be assessed.
-
-**US-04** — As a **military commander**, I want signals with dominant frequency f such that 0.5 ≤ f < 3.0 Hz classified as earthquake-like so that natural seismic activity can be separated from threats.
-
-**US-05** — As a **defence operator**, I want signals with dominant frequency f such that 3.0 ≤ f < 8.0 Hz classified as conventional explosion so that nearby units can be alerted.
-
-**US-06** — As **high command**, I want an immediate nuclear-like alert for dominant frequency ≥ 8.0 Hz so that emergency defensive protocols can be considered.
-
-**US-07** — As an **IT administrator**, I want the processing service replicated across two containers so that the system keeps operating if one node is lost or shut down.
-
-**US-08** — As a **database steward**, I want idempotent persistence so that duplicate detections from different replicas are stored only once.
-
-**US-09** — As a **command-centre operator**, I want a real-time dashboard showing recent detected events and their classification.
-
-**US-10** — As a **strategic researcher**, I want a historical log of persisted threats so that patterns in activity can be reviewed.
-
-**US-11** — As a **security officer**, I want replicas to react to a SHUTDOWN command over SSE so that simulated node failure matches the lab fault-injection contract.
-
-**US-12** — As a **technical user**, I want to see health status of distributed processing nodes from the dashboard.
-
-**US-13** — As a **field analyst**, I want every alert to show the sensor ID so that the source channel of the detection is explicit (mapping to geography is a separate operational concern).
-
-**US-14** — As a **deployment engineer**, I want to start the whole stack with a single `docker compose up` for repeatable field-style deployment.
-
-**US-15** — As a **developer**, I want a sliding window of samples per sensor so that frequency analysis is stable.
-
-| ID | Priority |
-|----|----------|
-| US-01 | Must |
-| US-02 | Must |
-| US-03 | Must |
-| US-04 | Must |
-| US-05 | Must |
-| US-06 | Must |
-| US-07 | Must |
-| US-08 | Must |
-| US-09 | Must |
-| US-10 | Must |
-| US-11 | Must |
-| US-12 | Must |
-| US-13 | Should |
-| US-14 | Must |
-| US-15 | Must |
+| ID | Role (Persona) | Requirement (I want...) | Motivation (So that...) | Priority |
+| :--- | :--- | :--- | :--- | :--- |
+| **US-01** | Broker (Ingestion) | Open WebSocket connections to each sensor stream | Real-time samples are received for downstream processing | **Must** |
+| **US-02** | Neutral Broker | Forward incoming samples to multiple processing nodes | Intelligence is not analysed in the neutral routing tier | **Must** |
+| **US-03** | Data Analyst | Compute the dominant frequency with FFT | The nature of the vibration can be assessed | **Must** |
+| **US-04** | Military Commander | Classify signals 0.5 ≤ f < 3.0 Hz as earthquake-like | Natural seismic activity can be separated from threats | **Must** |
+| **US-05** | Defence Operator | Classify signals 3.0 ≤ f < 8.0 Hz as conventional explosion | Nearby units can be alerted | **Must** |
+| **US-06** | High Command | Immediate nuclear-like alert for frequency ≥ 8.0 Hz | Emergency defensive protocols can be considered | **Must** |
+| **US-07** | IT Administrator | Replicate processing service across two containers | System keeps operating if one node is lost or shut down | **Must** |
+| **US-08** | Database Steward | Idempotent persistence | Duplicate detections from different replicas are stored only once | **Must** |
+| **US-09** | Command-centre Op. | Real-time dashboard showing recent detected events | Recent events and their classification are visible | **Must** |
+| **US-10** | Strategic Researcher | Historical log of persisted threats | Patterns in activity can be reviewed | **Must** |
+| **US-11** | Security Officer | Replicas to react to a SHUTDOWN command over SSE | Simulated node failure matches the lab contract | **Must** |
+| **US-12** | Technical User | See health status of distributed nodes on dashboard | Distributed system status is monitored | **Must** |
+| **US-13** | Field Analyst | Show the sensor ID for every alert | The source channel of the detection is explicit | **Should** |
+| **US-14** | Deployment Engineer | Start the whole stack with a single `docker compose up` | Repeatable field-style deployment is ensured | **Must** |
+| **US-15** | Developer | Sliding window of samples per sensor | Frequency analysis is stable | **Must** ||
 
 Priority: Must = baseline required by the lab brief. Should on US-13 marks analyst-facing emphasis on sensor identity (no built-in geolocation in scope).
 
