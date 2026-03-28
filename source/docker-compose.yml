@@ -38,6 +38,9 @@ services:
   processing-1:
     build: ./processing
     container_name: seismic-processing-1
+    # Il simulatore può inviare SHUTDOWN (SSE): la replica esce. Senza restart il DNS
+    # «processing-N» sparisce e il gateway mostra «Name or service not known».
+    restart: unless-stopped
     environment:
       REPLICA_ID: "1"
       SIMULATOR_BASE_URL: http://simulator:8080
@@ -67,6 +70,7 @@ services:
   processing-2:
     build: ./processing
     container_name: seismic-processing-2
+    restart: unless-stopped
     environment:
       REPLICA_ID: "2"
       SIMULATOR_BASE_URL: http://simulator:8080
@@ -109,17 +113,30 @@ services:
         condition: service_started
       processing-2:
         condition: service_started
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=2)",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
 
   web:
     build:
       context: ./web
       args:
-        VITE_GATEWAY_URL: http://localhost:8090
+        VITE_GATEWAY_URL: ""
     container_name: seismic-web
     ports:
       - "3000:80"
     depends_on:
-      - gateway
+      gateway:
+        condition: service_healthy
 
   broker:
     build: ./broker

@@ -30,7 +30,12 @@ SIMULATOR_BASE = os.environ.get("SIMULATOR_BASE_URL", "http://localhost:8080").r
 REPLICA_ID = os.environ.get("REPLICA_ID", "1")
 SAMPLING_RATE_HZ = float(os.environ.get("SAMPLING_RATE_HZ", "20"))
 WINDOW_SIZE = int(os.environ.get("WINDOW_SIZE", "128"))
+# Allineato alle bande di classificazione: il picco FFT si cerca solo ≥ 0.5 Hz
+# (altrimenti il bin più energetico è spesso ~0.16 Hz e tutto finisce in «below_band»).
+MIN_CLASSIFY_HZ = float(os.environ.get("MIN_CLASSIFY_HZ", "0.5"))
 ENERGY_THRESHOLD = float(os.environ.get("ENERGY_THRESHOLD", "0"))
+# Bucket temporale per dedup_key (secondi): repliche possono avere anchor_ts leggermente diversi (ordine HTTP/fan-out).
+DEDUP_BUCKET_SEC = float(os.environ.get("DEDUP_BUCKET_SEC", "0.5"))
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 
 pool: asyncpg.Pool | None = None
@@ -52,11 +57,24 @@ class ReplicaState:
 state = ReplicaState()
 
 
+def _dedup_time_bucket(anchor_ts: str) -> str:
+    """Allinea repliche che emettono lo stesso evento con timestamp ultimo campione sfasato."""
+    s = anchor_ts.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    t = dt.timestamp()
+    return str(int(t / DEDUP_BUCKET_SEC))
+
+
 def make_dedup_key(
     sensor_id: str, classification: str, dom_freq: float, anchor_ts: str
 ) -> str:
-    """Stessa finestra + stessi parametri → stessa chiave (repliche duplicate-safe)."""
-    s = f"{sensor_id}|{classification}|{round(dom_freq, 4)}|{anchor_ts}"
+    """Stesso evento logico cross-replica: bucket temporale + class + freq, non ISO al microsecondo."""
+    bucket = _dedup_time_bucket(anchor_ts)
+    s = f"{sensor_id}|{classification}|{round(dom_freq, 4)}|{bucket}"
     return hashlib.sha256(s.encode()).hexdigest()
 
 
@@ -83,7 +101,10 @@ def analyze_window(samples: list[float], fs: float) -> tuple[float | None, float
     freqs = np.fft.rfftfreq(n, d=1.0 / fs)
     if len(power) <= 1:
         return None, 0.0
-    k = int(np.argmax(power[1:]) + 1)
+    idx_hi = np.where(freqs[1:] >= MIN_CLASSIFY_HZ)[0] + 1
+    if idx_hi.size == 0:
+        return None, 0.0
+    k = int(idx_hi[int(np.argmax(power[idx_hi]))])
     energy = float(np.sum(power[1:]))
     return float(freqs[k]), energy
 
@@ -120,6 +141,17 @@ def process_sample(sensor_id: str, value: float, sample_ts: str) -> dict[str, An
     return evt
 
 
+def _parse_ts_for_pg(s: str) -> datetime:
+    """ISO-8601 → datetime timezone-aware per asyncpg/timestamptz."""
+    s = s.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 async def persist_event(p: asyncpg.Pool, evt: dict[str, Any]) -> None:
     """INSERT idempotente: seconda replica che calcola lo stesso evento viene ignorata."""
     sql = """
@@ -130,6 +162,7 @@ async def persist_event(p: asyncpg.Pool, evt: dict[str, Any]) -> None:
         VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7)
         ON CONFLICT (dedup_key) DO NOTHING
     """
+    detected = _parse_ts_for_pg(evt["detected_at"])
     await p.execute(
         sql,
         evt["dedup_key"],
@@ -137,7 +170,7 @@ async def persist_event(p: asyncpg.Pool, evt: dict[str, Any]) -> None:
         evt["classification"],
         evt["dominant_frequency_hz"],
         evt["energy"],
-        evt["detected_at"],
+        detected,
         evt["replica_id"],
     )
 
@@ -216,8 +249,14 @@ def health() -> dict[str, Any]:
 async def ingest(body: IngestBody) -> dict[str, str]:
     try:
         evt = process_sample(body.sensor_id, body.value, body.timestamp)
-        if evt and pool:
-            await persist_event(pool, evt)
+        if evt:
+            if pool:
+                await persist_event(pool, evt)
+            else:
+                LOG.warning(
+                    "evento in RAM ma DATABASE_URL assente — nessun INSERT: %s",
+                    evt.get("dedup_key"),
+                )
     except Exception as e:
         LOG.exception("ingest error: %s", e)
         raise HTTPException(status_code=500, detail="internal error") from e

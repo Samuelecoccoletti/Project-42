@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator
@@ -15,7 +16,7 @@ import asyncpg
 import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
@@ -32,6 +33,22 @@ PROCESSING_URLS = [
 ]
 
 pool: asyncpg.Pool | None = None
+
+# Round-robin sulle repliche; ogni richiesta parte dall’URL successivo, poi failover sul resto.
+_rr_lock = threading.Lock()
+_rr_offset = 0
+
+
+def _processing_urls_rotated() -> list[str]:
+    """Ordina PROCESSING_URLS ruotando il punto di partenza (thread-safe)."""
+    global _rr_offset
+    if not PROCESSING_URLS:
+        return []
+    with _rr_lock:
+        n = len(PROCESSING_URLS)
+        start = _rr_offset % n
+        _rr_offset += 1
+    return PROCESSING_URLS[start:] + PROCESSING_URLS[:start]
 
 
 def _event_row_to_dict(r: asyncpg.Record) -> dict[str, Any]:
@@ -51,16 +68,22 @@ async def _request_processing_failover(
     method: str,
     path: str,
     timeout: float = 5.0,
-) -> Any:
-    """Prova le repliche in ordine; la prima che risponde 200 vince (requisito fault tolerance)."""
+) -> tuple[Any, str]:
+    """
+    Prova le repliche in ordine ruotato (round-robin): la prima che risponde 200 vince;
+    le altre sono tentate in failover se errore o status ≠ 200.
+    Ritorna (corpo JSON, base_url della replica che ha risposto).
+    """
     last_err: str | None = None
+    order = _processing_urls_rotated()
     async with httpx.AsyncClient(timeout=timeout) as client:
-        for base in PROCESSING_URLS:
+        for base in order:
             url = f"{base}{path}"
             try:
                 r = await client.request(method, url)
                 if r.status_code == 200:
-                    return r.json() if r.content else None
+                    payload = r.json() if r.content else None
+                    return payload, base
                 last_err = f"{base} HTTP {r.status_code}"
             except Exception as e:
                 last_err = f"{base}: {e}"
@@ -89,6 +112,7 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Processing-Replica"],
 )
 
 
@@ -129,12 +153,15 @@ async def replicas_status() -> list[dict[str, Any]]:
 
 
 @app.get("/api/processing/recent-events")
-async def proxy_processing_recent_events() -> list[dict[str, Any]]:
+async def proxy_processing_recent_events() -> JSONResponse:
     """Inoltra a una replica online: memoria locale per-replica (debug / coerenza col lab)."""
-    data = await _request_processing_failover("GET", "/internal/recent-events")
+    data, chosen_base = await _request_processing_failover("GET", "/internal/recent-events")
     if not isinstance(data, list):
         raise HTTPException(502, detail="Risposta processing non valida")
-    return data
+    return JSONResponse(
+        content=data,
+        headers={"X-Processing-Replica": chosen_base},
+    )
 
 
 @app.get("/api/events")

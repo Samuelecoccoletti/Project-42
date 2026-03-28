@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 
+const rawGw = import.meta.env.VITE_GATEWAY_URL as string | undefined;
+/** Vuoto = URL relativi `/api/...` (proxy Vite in dev, nginx nel container `web`). */
 const GW =
-  import.meta.env.VITE_GATEWAY_URL?.replace(/\/$/, "") ||
-  "http://localhost:8090";
+  rawGw !== undefined && String(rawGw).trim() !== ""
+    ? String(rawGw).replace(/\/$/, "")
+    : "";
 
 export type EventRow = {
   dedup_key: string;
@@ -37,6 +40,7 @@ export function App() {
   const [err, setErr] = useState<string | null>(null);
   const [streamOk, setStreamOk] = useState<boolean | null>(null);
   const [replicaEvents, setReplicaEvents] = useState<EventRow[]>([]);
+  const [ramSourceUrl, setRamSourceUrl] = useState<string | null>(null);
 
   const loadReplicas = useCallback(async () => {
     try {
@@ -44,7 +48,10 @@ export function App() {
       if (!rRes.ok) throw new Error(`repliche HTTP ${rRes.status}`);
       setReplicas(await rRes.json());
     } catch (e) {
-      setErr(String(e));
+      const hint = GW || (typeof window !== "undefined" ? window.location.origin : "");
+      setErr(
+        `API non raggiungibile (${hint}). Avvia lo stack da source/ e ricarica: ${String(e)}`,
+      );
     }
   }, []);
 
@@ -58,7 +65,8 @@ export function App() {
       setEvents(await eRes.json());
       setErr(null);
     } catch (e) {
-      setErr(String(e));
+      const hint = GW || (typeof window !== "undefined" ? window.location.origin : "");
+      setErr(`API non raggiungibile (${hint}): ${String(e)}`);
     }
   }, [sensorFilter]);
 
@@ -67,12 +75,16 @@ export function App() {
       const r = await fetch(`${GW}/api/processing/recent-events`);
       if (!r.ok) {
         setReplicaEvents([]);
+        setRamSourceUrl(null);
         return;
       }
+      const src = r.headers.get("X-Processing-Replica");
+      setRamSourceUrl(src);
       const data = await r.json();
       setReplicaEvents(Array.isArray(data) ? data : []);
     } catch {
       setReplicaEvents([]);
+      setRamSourceUrl(null);
     }
   }, []);
 
@@ -93,28 +105,59 @@ export function App() {
   }, [loadReplicaMemory]);
 
   useEffect(() => {
-    const q = new URLSearchParams();
-    if (sensorFilter.trim()) q.set("sensor_id", sensorFilter.trim());
-    const url = `${GW}/api/events/stream${q.toString() ? `?${q}` : ""}`;
-    const es = new EventSource(url);
-    setStreamOk(true);
-    es.onmessage = (ev) => {
-      try {
-        const batch = JSON.parse(ev.data) as EventRow[];
-        if (Array.isArray(batch) && batch.length > 0) {
-          setEvents((prev) => mergeEvents(prev, batch));
+    let cancelled = false;
+    let es: EventSource | null = null;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let errDebounce: ReturnType<typeof setTimeout> | undefined;
+
+    const connect = () => {
+      if (cancelled) return;
+      const q = new URLSearchParams();
+      if (sensorFilter.trim()) q.set("sensor_id", sensorFilter.trim());
+      const url = `${GW}/api/events/stream${q.toString() ? `?${q}` : ""}`;
+      es?.close();
+      const inst = new EventSource(url);
+      es = inst;
+      inst.onopen = () => {
+        if (errDebounce !== undefined) {
+          window.clearTimeout(errDebounce);
+          errDebounce = undefined;
         }
-      } catch {
-        /* ignore */
-      }
+        if (!cancelled) setStreamOk(true);
+      };
+      inst.onmessage = (ev) => {
+        try {
+          const batch = JSON.parse(ev.data) as EventRow[];
+          if (Array.isArray(batch) && batch.length > 0) {
+            setEvents((prev) => mergeEvents(prev, batch));
+          }
+        } catch {
+          /* ignore */
+        }
+      };
+      inst.onerror = () => {
+        if (cancelled) return;
+        // Safari può emettere onerror anche con stream ancora aperto; non chiudere subito.
+        if (errDebounce !== undefined) window.clearTimeout(errDebounce);
+        errDebounce = window.setTimeout(() => {
+          errDebounce = undefined;
+          if (cancelled) return;
+          if (inst.readyState === EventSource.OPEN) return;
+          setStreamOk(false);
+          inst.close();
+          if (es === inst) es = null;
+          retry = window.setTimeout(connect, 4000);
+        }, 1500);
+      };
     };
-    es.onerror = () => {
-      setStreamOk(false);
-    };
+    connect();
     return () => {
-      es.close();
+      cancelled = true;
+      if (retry !== undefined) window.clearTimeout(retry);
+      if (errDebounce !== undefined) window.clearTimeout(errDebounce);
+      es?.close();
     };
-  }, [sensorFilter]);
+  }, [sensorFilter, GW]);
 
   return (
     <div className="app">
@@ -127,7 +170,17 @@ export function App() {
           ) : (
             <span>+ caricamento iniziale</span>
           )}
-          . Gateway: <a href={GW}>{GW}</a>
+          .{" "}
+          {GW ? (
+            <>
+              Gateway: <a href={GW}>{GW}</a>
+            </>
+          ) : (
+            <>
+              API su <strong>stesso origin</strong> (nginx/Vite → gateway). Test diretto:{" "}
+              <a href="http://localhost:8090/health">localhost:8090</a>
+            </>
+          )}
         </p>
       </header>
 
@@ -145,8 +198,9 @@ export function App() {
           )}
         </div>
         <p className="muted small">
-          Il gateway instrada <code>/api/processing/recent-events</code> verso la
-          prima valida (failover).
+          Il gateway usa round-robin + failover su{" "}
+          <code>/api/processing/recent-events</code> (header{" "}
+          <code>X-Processing-Replica</code>).
         </p>
       </section>
 
@@ -198,7 +252,15 @@ export function App() {
       <section className="panel">
         <h2>Ultime classificazioni in RAM (replica via gateway)</h2>
         <p className="muted small">
-          Campione dalla prima replica disponibile; non sostituisce il DB.
+          Dati dalla RAM della replica scelta dal gateway (round-robin); non
+          sostituisce il DB.
+          {ramSourceUrl && (
+            <>
+              {" "}
+              <strong>Origine ultima richiesta:</strong>{" "}
+              <code>{ramSourceUrl.replace(/^https?:\/\//, "")}</code>
+            </>
+          )}
         </p>
         <div className="table-wrap">
           <table>
