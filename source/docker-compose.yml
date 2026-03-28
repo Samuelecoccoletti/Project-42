@@ -1,0 +1,15 @@
+# Avvio dal repo: cd source && docker compose up -d
+# Richiede l'immagine locale (vedi scripts/load-simulator-oci.sh).
+
+services:
+  simulator:
+    image: seismic-signal-simulator:multiarch_v1
+    container_name: seismic-simulator
+    ports:
+      - "8080:8080"
+    environment:
+      SAMPLING_RATE_HZ: "20"
+      AUTO_SHUTDOWN_ENABLED: "true"
+      AUTO_SHUTDOWN_MIN_SECONDS: "30"
+      AUTO_SHUTDOWN_MAX_SECONDS: "90"
+    # Altri servizi (broker, processing, db, gateway, frontend) verranno aggiunti qui.
