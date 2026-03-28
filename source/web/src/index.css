@@ -33,6 +33,19 @@ header h1 {
   font-size: 0.9rem;
 }
 
+.muted.small,
+.small {
+  font-size: 0.82rem;
+  margin: 0.5rem 0 0;
+}
+
+code {
+  font-size: 0.85em;
+  background: #21262d;
+  padding: 0.12rem 0.35rem;
+  border-radius: 4px;
+}
+
 .panel {
   background: #161b22;
   border: 1px solid #30363d;

@@ -22,44 +22,112 @@ export type ReplicaRow = {
   error?: string;
 };
 
+function mergeEvents(prev: EventRow[], batch: EventRow[]): EventRow[] {
+  const map = new Map(prev.map((e) => [e.dedup_key, e]));
+  for (const e of batch) map.set(e.dedup_key, e);
+  return Array.from(map.values())
+    .sort((a, b) => b.detected_at.localeCompare(a.detected_at))
+    .slice(0, 200);
+}
+
 export function App() {
   const [events, setEvents] = useState<EventRow[]>([]);
   const [replicas, setReplicas] = useState<ReplicaRow[]>([]);
   const [sensorFilter, setSensorFilter] = useState("");
   const [err, setErr] = useState<string | null>(null);
+  const [streamOk, setStreamOk] = useState<boolean | null>(null);
+  const [replicaEvents, setReplicaEvents] = useState<EventRow[]>([]);
 
-  const load = useCallback(async () => {
+  const loadReplicas = useCallback(async () => {
+    try {
+      const rRes = await fetch(`${GW}/api/replicas`);
+      if (!rRes.ok) throw new Error(`repliche HTTP ${rRes.status}`);
+      setReplicas(await rRes.json());
+    } catch (e) {
+      setErr(String(e));
+    }
+  }, []);
+
+  const loadEventsOnce = useCallback(async () => {
     try {
       const q = new URLSearchParams();
       q.set("limit", "100");
       if (sensorFilter.trim()) q.set("sensor_id", sensorFilter.trim());
-      const [eRes, rRes] = await Promise.all([
-        fetch(`${GW}/api/events?${q}`),
-        fetch(`${GW}/api/replicas`),
-      ]);
+      const eRes = await fetch(`${GW}/api/events?${q}`);
       if (!eRes.ok) throw new Error(`eventi HTTP ${eRes.status}`);
-      if (!rRes.ok) throw new Error(`repliche HTTP ${rRes.status}`);
       setEvents(await eRes.json());
-      setReplicas(await rRes.json());
       setErr(null);
     } catch (e) {
       setErr(String(e));
     }
   }, [sensorFilter]);
 
+  const loadReplicaMemory = useCallback(async () => {
+    try {
+      const r = await fetch(`${GW}/api/processing/recent-events`);
+      if (!r.ok) {
+        setReplicaEvents([]);
+        return;
+      }
+      const data = await r.json();
+      setReplicaEvents(Array.isArray(data) ? data : []);
+    } catch {
+      setReplicaEvents([]);
+    }
+  }, []);
+
   useEffect(() => {
-    void load();
-    const id = setInterval(() => void load(), 2500);
+    void loadEventsOnce();
+  }, [loadEventsOnce]);
+
+  useEffect(() => {
+    void loadReplicas();
+    const id = setInterval(() => void loadReplicas(), 4000);
     return () => clearInterval(id);
-  }, [load]);
+  }, [loadReplicas]);
+
+  useEffect(() => {
+    void loadReplicaMemory();
+    const id = setInterval(() => void loadReplicaMemory(), 5000);
+    return () => clearInterval(id);
+  }, [loadReplicaMemory]);
+
+  useEffect(() => {
+    const q = new URLSearchParams();
+    if (sensorFilter.trim()) q.set("sensor_id", sensorFilter.trim());
+    const url = `${GW}/api/events/stream${q.toString() ? `?${q}` : ""}`;
+    const es = new EventSource(url);
+    setStreamOk(true);
+    es.onmessage = (ev) => {
+      try {
+        const batch = JSON.parse(ev.data) as EventRow[];
+        if (Array.isArray(batch) && batch.length > 0) {
+          setEvents((prev) => mergeEvents(prev, batch));
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+    es.onerror = () => {
+      setStreamOk(false);
+    };
+    return () => {
+      es.close();
+    };
+  }, [sensorFilter]);
 
   return (
     <div className="app">
       <header>
         <h1>Seismic — dashboard</h1>
         <p className="muted">
-          Aggiornamento automatico ogni ~2,5 s. API gateway:{" "}
-          <a href={GW}>{GW}</a>
+          Eventi PostgreSQL: <strong>SSE</strong>{" "}
+          {streamOk === false ? (
+            <span className="error">(stream in errore — usa &quot;Aggiorna&quot;)</span>
+          ) : (
+            <span>+ caricamento iniziale</span>
+          )}
+          . Gateway: <a href={GW}>{GW}</a>
         </p>
       </header>
 
@@ -76,10 +144,14 @@ export function App() {
             <span className="muted">Nessun dato repliche.</span>
           )}
         </div>
+        <p className="muted small">
+          Il gateway instrada <code>/api/processing/recent-events</code> verso la
+          prima valida (failover).
+        </p>
       </section>
 
       <section className="panel">
-        <h2>Eventi rilevati (PostgreSQL)</h2>
+        <h2>Eventi persistiti (PostgreSQL)</h2>
         <div className="row">
           <label>
             Filtra sensore{" "}
@@ -89,8 +161,8 @@ export function App() {
               placeholder="es. sensor-01"
             />
           </label>
-          <button type="button" onClick={() => void load()}>
-            Aggiorna ora
+          <button type="button" onClick={() => void loadEventsOnce()}>
+            Aggiorna ora (REST)
           </button>
         </div>
         {err && <p className="error">{err}</p>}
@@ -119,6 +191,40 @@ export function App() {
           </table>
           {events.length === 0 && !err && (
             <p className="muted">Nessun evento in tabella (o DB ancora vuoto).</p>
+          )}
+        </div>
+      </section>
+
+      <section className="panel">
+        <h2>Ultime classificazioni in RAM (replica via gateway)</h2>
+        <p className="muted small">
+          Campione dalla prima replica disponibile; non sostituisce il DB.
+        </p>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Tempo</th>
+                <th>Sensore</th>
+                <th>Classe</th>
+                <th>Freq</th>
+                <th>R</th>
+              </tr>
+            </thead>
+            <tbody>
+              {replicaEvents.slice(-12).map((ev) => (
+                <tr key={`${ev.dedup_key}-ram`}>
+                  <td>{ev.detected_at}</td>
+                  <td>{ev.sensor_id}</td>
+                  <td>{ev.classification}</td>
+                  <td>{ev.dominant_frequency_hz?.toFixed?.(3) ?? ev.dominant_frequency_hz}</td>
+                  <td>{ev.replica_id}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {replicaEvents.length === 0 && (
+            <p className="muted">Nessun dato o repliche non raggiungibili.</p>
           )}
         </div>
       </section>

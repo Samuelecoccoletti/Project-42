@@ -6,12 +6,12 @@
 - **Broker**: fan-out verso le repliche processing.
 - **Processing ×2**: FFT/classificazione + scrittura su **PostgreSQL** con `dedup_key` unica.
 - **PostgreSQL**: tabella `detected_events` (nessun DB embedded).
-- **Gateway** (8090): lettura eventi, stato repliche (`GET /api/replicas`), CORS per il browser.
-- **Web** (3000): dashboard statico (React/Vite) — polling eventi e repliche.
+- **Gateway** (8090): REST eventi, **SSE** `/api/events/stream`, **`/api/processing/*` con failover** verso le repliche, CORS.
+- **Web** (3000): dashboard React — SSE per nuovi eventi DB + REST iniziale; tab RAM replica via gateway.
 
 ## Servizi
 
-Simulatore, broker, `processing-1`, `processing-2`, `db`, `gateway`. Frontend da aggiungere.
+Simulatore, broker, `processing-1`, `processing-2`, `db`, `gateway`, `web`.
 
 ## Passo 1 — Teoria: cos’è il broker e perché parte da qui
 
@@ -77,11 +77,24 @@ Serve a:
 - **CORS**: il browser carica la pagina da `localhost:3000` e le API da `localhost:8090` (origine diversa) → il gateway espone header CORS.
 - **URL gateway**: in build Docker la variabile `VITE_GATEWAY_URL` è incollata nel bundle statico (`http://localhost:8090` quando apri il browser sulla macchina host).
 
+## Passo 5 — Gateway: failover e SSE
+
+### Teoria (allineamento al lab)
+
+- **Routing verso repliche disponibili**: `GET /api/processing/recent-events` interroga le URL in `PROCESSING_URLS` in ordine; la **prima** che risponde 200 viene usata. Le altre sono saltate (replica “esclusa” fino al prossimo tentativo).
+- **Health aggregato**: `GET /health` include quante repliche processing rispondono.
+- **SSE**: `GET /api/events/stream` invia chunk `data:` con nuovi record da `detected_events` (watermark su `created_at`), più commenti heartbeat `: hb` per mantenere la connessione. Alternativa al solo polling REST per il requisito “real-time”.
+
+### Dashboard
+
+- **EventSource** sullo stream; merge per `dedup_key` per evitare duplicati.
+- Seconda tabella: ultimi eventi **in RAM** dalla replica selezionata dal gateway (solo informativa; persistenza resta il DB).
+
 ## Note operative
 
 - Simulatore: `http://localhost:8080` (vedi `source/docker-compose.yml` e `source/scripts/load-simulator-oci.sh`).
 - Repliche: `http://localhost:8001` e `http://localhost:8002` (porte host mappate).
-- Gateway: `http://localhost:8090/health`, `http://localhost:8090/api/events`, `http://localhost:8090/api/replicas`.
+- Gateway: `http://localhost:8090/health`, `http://localhost:8090/api/events`, `http://localhost:8090/api/replicas`, `http://localhost:8090/api/processing/recent-events`, `http://localhost:8090/api/events/stream` (SSE).
 - Dashboard: `http://localhost:3000` (dopo `docker compose up`).
 - Debug eventi in memoria: `GET http://localhost:8001/internal/recent-events` (e analogo su 8002).
 - Se il broker va in errore `keepalive ping timeout` su molti sensori: per default i **ping inviati dal client WebSocket sono disattivi** (`WS_PING_INTERVAL` / `WS_PING_TIMEOUT` vuoti); il traffico campioni mantiene la connessione. Riattiva i ping solo se serve, es. `WS_PING_INTERVAL=60`.

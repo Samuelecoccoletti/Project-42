@@ -1,18 +1,21 @@
 """
-Gateway: ingresso unico — persistenza, stato repliche processing, CORS per il dashboard.
+Gateway: persistenza, stato repliche, routing con failover verso processing, SSE eventi.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
-import sys
 from contextlib import asynccontextmanager
-from typing import Any
+from datetime import datetime, timedelta, timezone
+from typing import Any, AsyncIterator
 
 import asyncpg
 import httpx
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
@@ -29,6 +32,43 @@ PROCESSING_URLS = [
 ]
 
 pool: asyncpg.Pool | None = None
+
+
+def _event_row_to_dict(r: asyncpg.Record) -> dict[str, Any]:
+    return {
+        "dedup_key": r["dedup_key"],
+        "sensor_id": r["sensor_id"],
+        "classification": r["classification"],
+        "dominant_frequency_hz": float(r["dominant_frequency_hz"]),
+        "energy": float(r["energy"]) if r["energy"] is not None else None,
+        "detected_at": r["detected_at"].isoformat(),
+        "replica_id": r["replica_id"],
+        "created_at": r["created_at"].isoformat(),
+    }
+
+
+async def _request_processing_failover(
+    method: str,
+    path: str,
+    timeout: float = 5.0,
+) -> Any:
+    """Prova le repliche in ordine; la prima che risponde 200 vince (requisito fault tolerance)."""
+    last_err: str | None = None
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        for base in PROCESSING_URLS:
+            url = f"{base}{path}"
+            try:
+                r = await client.request(method, url)
+                if r.status_code == 200:
+                    return r.json() if r.content else None
+                last_err = f"{base} HTTP {r.status_code}"
+            except Exception as e:
+                last_err = f"{base}: {e}"
+                continue
+    raise HTTPException(
+        status_code=503,
+        detail="Nessuna replica processing disponibile: " + (last_err or "unknown"),
+    )
 
 
 @asynccontextmanager
@@ -57,12 +97,25 @@ async def health() -> dict[str, Any]:
     assert pool is not None
     async with pool.acquire() as conn:
         await conn.fetchval("SELECT 1")
-    return {"status": "ok", "database": "reachable"}
+    replicas_ok = 0
+    async with httpx.AsyncClient(timeout=2.0) as client:
+        for base in PROCESSING_URLS:
+            try:
+                r = await client.get(f"{base}/health")
+                if r.status_code == 200:
+                    replicas_ok += 1
+            except Exception:
+                pass
+    return {
+        "status": "ok",
+        "database": "reachable",
+        "processing_replicas_healthy": replicas_ok,
+        "processing_replicas_total": len(PROCESSING_URLS),
+    }
 
 
 @app.get("/api/replicas")
 async def replicas_status() -> list[dict[str, Any]]:
-    """Health delle repliche processing (per dashboard e fault tolerance futura)."""
     out: list[dict[str, Any]] = []
     async with httpx.AsyncClient(timeout=3.0) as client:
         for base in PROCESSING_URLS:
@@ -73,6 +126,15 @@ async def replicas_status() -> list[dict[str, Any]]:
             except Exception as e:
                 out.append({"url": base, "ok": False, "error": str(e)})
     return out
+
+
+@app.get("/api/processing/recent-events")
+async def proxy_processing_recent_events() -> list[dict[str, Any]]:
+    """Inoltra a una replica online: memoria locale per-replica (debug / coerenza col lab)."""
+    data = await _request_processing_failover("GET", "/internal/recent-events")
+    if not isinstance(data, list):
+        raise HTTPException(502, detail="Risposta processing non valida")
+    return data
 
 
 @app.get("/api/events")
@@ -105,21 +167,71 @@ async def list_events(
             """,
             limit,
         )
-    result: list[dict[str, Any]] = []
-    for r in rows:
-        result.append(
-            {
-                "dedup_key": r["dedup_key"],
-                "sensor_id": r["sensor_id"],
-                "classification": r["classification"],
-                "dominant_frequency_hz": float(r["dominant_frequency_hz"]),
-                "energy": float(r["energy"]) if r["energy"] is not None else None,
-                "detected_at": r["detected_at"].isoformat(),
-                "replica_id": r["replica_id"],
-                "created_at": r["created_at"].isoformat(),
-            }
-        )
-    return result
+    return [_event_row_to_dict(r) for r in rows]
+
+
+@app.get("/api/events/stream")
+async def events_stream(
+    sensor_id: str | None = Query(default=None, description="Filtra solo questo sensore"),
+) -> StreamingResponse:
+    """
+    SSE: nuovi eventi dal DB dopo la connessione (watermark su created_at).
+    Heartbeat ogni ciclo se non ci sono righe, per tenere viva la connessione.
+    """
+    assert pool is not None
+    poll_s = float(os.environ.get("SSE_POLL_SECONDS", "2"))
+
+    async def gen() -> AsyncIterator[bytes]:
+        watermark = datetime.now(timezone.utc) - timedelta(seconds=30)
+        try:
+            while True:
+                async with pool.acquire() as conn:
+                    if sensor_id:
+                        rows = await conn.fetch(
+                            """
+                            SELECT dedup_key, sensor_id, classification, dominant_frequency_hz, energy,
+                                   detected_at, replica_id, created_at
+                            FROM detected_events
+                            WHERE sensor_id = $1 AND created_at > $2
+                            ORDER BY created_at ASC
+                            LIMIT 100
+                            """,
+                            sensor_id,
+                            watermark,
+                        )
+                    else:
+                        rows = await conn.fetch(
+                            """
+                            SELECT dedup_key, sensor_id, classification, dominant_frequency_hz, energy,
+                                   detected_at, replica_id, created_at
+                            FROM detected_events
+                            WHERE created_at > $1
+                            ORDER BY created_at ASC
+                            LIMIT 100
+                            """,
+                            watermark,
+                        )
+                if rows:
+                    ts_max = max(r["created_at"] for r in rows)
+                    if ts_max > watermark:
+                        watermark = ts_max
+                    payload = json.dumps([_event_row_to_dict(r) for r in rows])
+                    yield f"data: {payload}\n\n".encode()
+                else:
+                    yield b": hb\n\n"
+                await asyncio.sleep(poll_s)
+        except asyncio.CancelledError:
+            raise
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 def main() -> None:
