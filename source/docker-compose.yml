@@ -1,5 +1,5 @@
-# Avvio dal repo: cd source && docker compose up -d
-# Richiede l'immagine locale (vedi scripts/load-simulator-oci.sh).
+# Avvio: cd source && docker compose up --build
+# Simulatore: richiede immagine locale (scripts/load-simulator-oci.sh)
 
 services:
   simulator:
@@ -12,4 +12,43 @@ services:
       AUTO_SHUTDOWN_ENABLED: "true"
       AUTO_SHUTDOWN_MIN_SECONDS: "30"
       AUTO_SHUTDOWN_MAX_SECONDS: "90"
-    # Altri servizi (broker, processing, db, gateway, frontend) verranno aggiunti qui.
+
+  processing-1:
+    build: ./processing
+    container_name: seismic-processing-1
+    environment:
+      REPLICA_ID: "1"
+      SIMULATOR_BASE_URL: http://simulator:8080
+      SAMPLING_RATE_HZ: "20"
+      PORT: "8000"
+    ports:
+      - "8001:8000"
+    depends_on:
+      - simulator
+
+  processing-2:
+    build: ./processing
+    container_name: seismic-processing-2
+    environment:
+      REPLICA_ID: "2"
+      SIMULATOR_BASE_URL: http://simulator:8080
+      SAMPLING_RATE_HZ: "20"
+      PORT: "8000"
+    ports:
+      - "8002:8000"
+    depends_on:
+      - simulator
+
+  broker:
+    build: ./broker
+    container_name: seismic-broker
+    environment:
+      SIMULATOR_BASE_URL: http://simulator:8080
+      PROCESSING_URLS: http://processing-1:8000,http://processing-2:8000
+      ALL_SENSORS: "true"
+      MAX_SAMPLES: "0"
+      LOG_LEVEL: INFO
+    depends_on:
+      - simulator
+      - processing-1
+      - processing-2
