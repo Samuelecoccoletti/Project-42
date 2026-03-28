@@ -99,11 +99,27 @@ services:
     environment:
       DATABASE_URL: postgresql://seismic:seismic@db:5432/seismic
       PORT: "8090"
+      PROCESSING_URLS: http://processing-1:8000,http://processing-2:8000
     ports:
       - "8090:8090"
     depends_on:
       db:
         condition: service_healthy
+      processing-1:
+        condition: service_started
+      processing-2:
+        condition: service_started
+
+  web:
+    build:
+      context: ./web
+      args:
+        VITE_GATEWAY_URL: http://localhost:8090
+    container_name: seismic-web
+    ports:
+      - "3000:80"
+    depends_on:
+      - gateway
 
   broker:
     build: ./broker

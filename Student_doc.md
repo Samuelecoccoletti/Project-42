@@ -6,7 +6,8 @@
 - **Broker**: fan-out verso le repliche processing.
 - **Processing ×2**: FFT/classificazione + scrittura su **PostgreSQL** con `dedup_key` unica.
 - **PostgreSQL**: tabella `detected_events` (nessun DB embedded).
-- **Gateway** (8090): lettura eventi per il futuro dashboard (`GET /api/events`).
+- **Gateway** (8090): lettura eventi, stato repliche (`GET /api/replicas`), CORS per il browser.
+- **Web** (3000): dashboard statico (React/Vite) — polling eventi e repliche.
 
 ## Servizi
 
@@ -66,11 +67,21 @@ Serve a:
 
 - `source/db/init.sql` — schema PostgreSQL.
 - `source/gateway/` — API lettura eventi.
+- `source/web/` — dashboard (build → nginx).
+
+## Passo 4 — Dashboard
+
+### Teoria
+
+- **Aggiornamenti in tempo quasi reale**: il front-end chiama periodicamente (**polling** ~2,5 s) `GET /api/events` e `GET /api/replicas`. È tra le opzioni ammesse dal laboratorio (REST polling vs SSE/WebSocket lato dashboard).
+- **CORS**: il browser carica la pagina da `localhost:3000` e le API da `localhost:8090` (origine diversa) → il gateway espone header CORS.
+- **URL gateway**: in build Docker la variabile `VITE_GATEWAY_URL` è incollata nel bundle statico (`http://localhost:8090` quando apri il browser sulla macchina host).
 
 ## Note operative
 
 - Simulatore: `http://localhost:8080` (vedi `source/docker-compose.yml` e `source/scripts/load-simulator-oci.sh`).
 - Repliche: `http://localhost:8001` e `http://localhost:8002` (porte host mappate).
-- Gateway: `http://localhost:8090/health`, `http://localhost:8090/api/events`.
+- Gateway: `http://localhost:8090/health`, `http://localhost:8090/api/events`, `http://localhost:8090/api/replicas`.
+- Dashboard: `http://localhost:3000` (dopo `docker compose up`).
 - Debug eventi in memoria: `GET http://localhost:8001/internal/recent-events` (e analogo su 8002).
 - Se il broker va in errore `keepalive ping timeout` su molti sensori: per default i **ping inviati dal client WebSocket sono disattivi** (`WS_PING_INTERVAL` / `WS_PING_TIMEOUT` vuoti); il traffico campioni mantiene la connessione. Riattiva i ping solo se serve, es. `WS_PING_INTERVAL=60`.
