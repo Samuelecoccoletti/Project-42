@@ -1,105 +1,179 @@
-# Documentazione del sistema distribuito
+# Student documentation — Project42
 
-## Architettura deployata
+Technical description of the deployed system (containers, ports, persistence, APIs). User stories and backlog are in `input.md` only.
 
-- **Simulatore** (8080): sensori WebSocket + SSE control.
-- **Broker**: fan-out verso le repliche processing.
-- **Processing ×2**: FFT/classificazione + scrittura su **PostgreSQL** con `dedup_key` unica.
-- **PostgreSQL**: tabella `detected_events` (nessun DB embedded).
-- **Gateway** (8090): REST eventi, **SSE** `/api/events/stream`, **`/api/processing/*` con failover** verso le repliche, CORS.
-- **Web** (3000): dashboard React — SSE per nuovi eventi DB + REST iniziale; tab RAM replica via gateway.
+## Contents
 
-## Servizi
+1. [System overview](#1-system-overview)  
+2. [Container and port map](#2-container-and-port-map)  
+3. [Shared database schema](#3-shared-database-schema)  
+4. [Containers](#4-containers)  
+5. [Run and URLs](#5-run-and-urls)
 
-Simulatore, broker, `processing-1`, `processing-2`, `db`, `gateway`, `web`.
+---
 
-## Passo 1 — Teoria: cos’è il broker e perché parte da qui
+## 1. System overview
 
-### Ruolo del simulatore (fornitore)
+The stack ingests simulated seismic data from the course **simulator** (WebSocket per sensor). A **broker** discovers sensors over REST, subscribes to each stream, and fans out every sample over HTTP to **two processing replicas**. Each replica keeps a per-sensor sliding window, runs FFT, classifies by frequency band, and writes to **PostgreSQL** using an idempotent `dedup_key`. Replicas subscribe to the simulator SSE control API and exit on `SHUTDOWN`. A **gateway** exposes read APIs, SSE for new events, replica health, and proxies to processing with round-robin and failover. The **web** container serves the React dashboard and proxies `/api` to the gateway so the browser uses one origin on port 3000.
 
-Il simulatore espone **N sensori virtuali**. Per ogni sensore:
+---
 
-- scopri l’id e il path WebSocket con **GET `/api/devices/`**;
-- i campioni **non** arrivano via REST in polling: arrivano in **streaming** su  
-  **WebSocket** `WS /api/device/{sensor_id}/ws`.
+## 2. Container and port map
 
-Ogni messaggio è un oggetto JSON con `timestamp` (UTC) e `value` (velocità di terra in mm/s).  
-Il flusso è **continuo** (es. 20 Hz se `SAMPLING_RATE_HZ=20`): chi si connette riceve una sequenza infinita di campioni.
+| Container name | Service | Host port | Container port | Notes |
+|----------------|---------|-----------|------------------|-------|
+| seismic-db | PostgreSQL 16 | 5432 (optional) | 5432 | Volume `pgdata` |
+| seismic-simulator | Course simulator | 8080 | 8080 | Do not modify image |
+| seismic-broker | Broker worker | — | — | No listening ports |
+| seismic-processing-1 | Processing replica 1 | 8001 | 8000 | Same image as replica 2 |
+| seismic-processing-2 | Processing replica 2 | 8002 | 8000 | |
+| seismic-gateway | Gateway API | 8090 | 8090 | |
+| seismic-web | nginx + SPA | 3000 | 80 | Proxies `/api` → gateway |
 
-### Ruolo del broker (distribuzione, non intelligenza)
+Compose file: `source/docker-compose.yml`.
 
-Il **broker** è il componente che **riceve** i dati grezzi dal simulatore e li **inoltra** alle **repliche di processing** (in un secondo momento: fan-out).  
-Non deve fare FFT, classificazione o persistenza: solo **smistare** le misure.  
-È l’unico punto che parla direttamente col simulatore per l’ingestione WebSocket; le repliche restano dietro al broker.
+---
 
-### Implementazione broker
+## 3. Shared database schema
 
-Il servizio in `source/broker/` fa **discovery** (`GET /api/devices/`), apre **un WebSocket per sensore** (o un sottoinsieme se `ALL_SENSORS=false`) e per ogni campione esegue **fan-out** HTTP `POST /internal/ingest` verso tutte le URL in `PROCESSING_URLS`. Con `PROCESSING_URLS` vuoto resta la modalità **probe** (solo log). Variabili utili: `ALL_SENSORS`, `WS_PING_*`, `MAX_SAMPLES`.
+Schema file: `source/db/init.sql`. Processing replicas insert into this table; the gateway reads it.
 
-## Passo 2 — Fan-out e repliche processing
+**Table `detected_events`**
 
-### Teoria
+| Column | Type | Constraints / notes |
+|--------|------|---------------------|
+| id | BIGSERIAL | Primary key |
+| dedup_key | CHAR(64) | NOT NULL, UNIQUE — idempotency across replicas |
+| sensor_id | TEXT | NOT NULL |
+| classification | TEXT | NOT NULL |
+| dominant_frequency_hz | DOUBLE PRECISION | NOT NULL |
+| energy | DOUBLE PRECISION | Nullable |
+| detected_at | TIMESTAMPTZ | NOT NULL |
+| replica_id | TEXT | Nullable |
+| created_at | TIMESTAMPTZ | NOT NULL, default NOW() |
 
-- **Fan-out**: per ogni campione ricevuto dal WebSocket, il broker invia **la stessa copia** a **tutte** le URL in `PROCESSING_URLS` (HTTP `POST /internal/ingest`). È il broadcast richiesto dal testo.
-- **Replica processing**: mantiene una **finestra scorrevole** di campioni **per sensore**; quando la finestra è piena applica **FFT**. Il picco si considera solo tra bin **≥ 0.5 Hz** (stessa soglia delle bande): altrimenti il massimo spesso cade sul primo bin (~\(f_s/N\), es. ~0.16 Hz a 20 Hz e 128 campioni) e ogni evento verrebbe scartato come «sotto banda».
-- **Control stream (SSE)**: ogni replica si connette a `GET /api/control` del simulatore. Se riceve `{"command":"SHUTDOWN"}`, **quella** replica deve terminare (il contratto ne notifica **una sola** alla volta).
+Indexes: `detected_at` (desc), `sensor_id`.
 
-### File
+---
 
-- `source/processing/` — API ingest + health + SSE + FFT.
-- `source/broker/app.py` — fan-out verso `processing-1` e `processing-2`.
+## 4. Containers
 
-## Passo 3 — Persistenza e gateway
+### 4.1 seismic-db
 
-### Teoria
+- **Role:** Shared relational store for classified events.
+- **Persistence:** Strong — data on named volume `pgdata` until volume removed or `docker compose down -v`.
+- **Connections:** Gateway and both processing replicas connect to `db:5432` (credentials from compose).
 
-- Due repliche possono calcolare **lo stesso evento** a partire dagli stessi campioni. Serve un **dedup** deterministico:  
-  `sha256(sensor_id | classificazione | freq arrotondata | bucket temporale)`. Il bucket è `floor(t/0.5s)` sull’istante dell’ultimo campione (`DEDUP_BUCKET_SEC`), così piccoli sfasamenti tra repliche non creano due INSERT; il `detected_at` salvato resta il timestamp preciso della replica che vince la gara in scrittura.
-  Unico vincolo `UNIQUE(dedup_key)` + `INSERT ... ON CONFLICT DO NOTHING` → una sola riga in DB.
-- **Gateway**: punto d’ingresso unico per **leggere** gli eventi (il lab richiede anche routing/health verso le repliche; qui espone già lista eventi e health sul DB).
+**Microservice: postgresql (database)**  
+PostgreSQL 16 Alpine; user/database `seismic`. Uniqueness on `dedup_key`; application uses `INSERT … ON CONFLICT (dedup_key) DO NOTHING`.
 
-### File
+---
 
-- `source/db/init.sql` — schema PostgreSQL.
-- `source/gateway/` — API lettura eventi.
-- `source/web/` — dashboard (build → nginx).
+### 4.2 seismic-simulator
 
-## Passo 4 — Dashboard
+- **Role:** Provided image `seismic-signal-simulator:multiarch_v1` — sensor WebSocket streams, device discovery REST, SSE fault injection (`SHUTDOWN` to one listener).
+- **Persistence:** Not part of the team persistence deliverable.
+- **Connections:** Broker uses HTTP/WebSocket to `simulator:8080`; replicas use SSE `GET /api/control`. Host: `http://localhost:8080` for `/health` and OpenAPI.
 
-### Teoria
+**Microservice: seismic-signal-simulator (provided backend)**
 
-- **Aggiornamenti in tempo quasi reale**: il front-end chiama periodicamente (**polling** ~2,5 s) `GET /api/events` e `GET /api/replicas`. È tra le opzioni ammesse dal laboratorio (REST polling vs SSE/WebSocket lato dashboard).
-- **CORS**: in Docker la dashboard usa **stesso origine** (`3000` → nginx → gateway); in dev, `npm run dev` con proxy Vite. Se apri il bundle con `VITE_GATEWAY_URL=http://localhost:8090`, allora serve CORS sul gateway (già configurato con `CORS_ORIGINS`).
-- **URL gateway**: in build Docker `VITE_GATEWAY_URL` è **vuota**; il front-end usa `/api/...` sulla stessa origine (`3000`) e **nginx** nel container `web` fa proxy verso il gateway. In sviluppo (`npm run dev`) Vite fa proxy di `/api` su `8090`. Per forzare l’URL assoluto del gateway, imposta `VITE_GATEWAY_URL` nella build.
+| Method | URL | Description |
+|--------|-----|-------------|
+| GET | `/health` | Health |
+| GET | `/api/devices/` | Sensors and WebSocket paths |
+| GET | `/openapi.json`, `/docs` | API contract |
+| WebSocket | `/api/device/{sensor_id}/ws` | Sample stream (timestamp, mm/s) |
+| GET (SSE) | `/api/control` | control-open, heartbeat, command |
 
-## Passo 5 — Gateway: failover e SSE
+Env examples in compose: `SAMPLING_RATE_HZ`, `AUTO_SHUTDOWN_*`.
 
-### Teoria (allineamento al lab)
+---
 
-- **Routing verso repliche disponibili**: `GET /api/processing/recent-events` (e altre proxy verso processing) usa **round-robin** sulle URL in `PROCESSING_URLS`: ogni richiesta parte dalla replica “successiva”, così il carico di lettura si distribuisce. Se quella replica non risponde 200, il gateway **prova le altre** in failover fino a esaurimento (replica down = saltata per quel tentativo).
-- **Health aggregato**: `GET /health` include quante repliche processing rispondono.
-- **SSE**: `GET /api/events/stream` invia chunk `data:` con nuovi record da `detected_events` (watermark su `created_at`), più commenti heartbeat `: hb` per mantenere la connessione. Alternativa al solo polling REST per il requisito “real-time”. Se la dashboard mostra «stream in errore» (soprattutto Safari): non usare `Connection` vuoto sul proxy nginx verso il gateway; il front-end ignora `onerror` immediati e riconnette solo se lo stream resta chiuso.
+### 4.3 seismic-broker
 
-### Dashboard
+- **Role:** Python async worker — discovery, one WebSocket per sensor, parallel HTTP POST of each sample to all `PROCESSING_URLS`. No FFT, no DB.
+- **Ports:** None (client only).
+- **Persistence:** None (transient while posting).
+- **Connections:** Outbound to `simulator:8080` and to `processing-1:8000`, `processing-2:8000` (`POST /internal/ingest`).
 
-- **EventSource** sullo stream; merge per `dedup_key` per evitare duplicati.
-- Seconda tabella: ultimi eventi **in RAM** dalla replica selezionata dal gateway (solo informativa; persistenza resta il DB).
+**Microservice: broker-ingest (backend, no HTTP server)**  
+Stack: Python 3, httpx, websockets. Env: `SIMULATOR_BASE_URL`, `PROCESSING_URLS`, `ALL_SENSORS`, `MAX_SAMPLES`, `WS_PING_*`. No exposed endpoints.
 
-## Note operative
+---
 
-- Simulatore: `http://localhost:8080` (vedi `source/docker-compose.yml` e `source/scripts/load-simulator-oci.sh`).
-- Repliche: `http://localhost:8001` e `http://localhost:8002` (porte host mappate).
-- Gateway: `http://localhost:8090/health`, `http://localhost:8090/api/events`, `http://localhost:8090/api/replicas`, `http://localhost:8090/api/processing/recent-events` (risposta con header `X-Processing-Replica`: URL della replica che ha servito), `http://localhost:8090/api/events/stream` (SSE).
-- Dashboard: `http://localhost:3000` (dopo `docker compose up`).
-- Debug eventi in memoria: `GET http://localhost:8001/internal/recent-events` (e analogo su 8002).
-- Se il broker va in errore `keepalive ping timeout` su molti sensori: per default i **ping inviati dal client WebSocket sono disattivi** (`WS_PING_INTERVAL` / `WS_PING_TIMEOUT` vuoti); il traffico campioni mantiene la connessione. Riattiva i ping solo se serve, es. `WS_PING_INTERVAL=60`.
+### 4.4 seismic-processing-1 and seismic-processing-2
 
-### RAM popolata ma PostgreSQL vuoto
+- **Role:** Two instances of the same image. Ingest from broker, sliding window + FFT + classification, write to PostgreSQL, SSE control loop for `SHUTDOWN`.
+- **Differences:** `REPLICA_ID` (1 vs 2) and host port mapping (8001 vs 8002 → 8000 in container).
+- **Persistence:** In-memory windows and recent-event buffer (volatile); durable rows in PostgreSQL (see §3).
+- **Connections:** Inbound HTTP from broker; outbound asyncpg to `db`, SSE to `simulator`.
 
-La RAM è locale alla replica; il DB richiede `DATABASE_URL` e insert riusciti. Se vedi eventi nella tab RAM ma zero righe in `detected_events`: controlla `GET http://localhost:8001/health` → `persistence: true`; nei log della replica, messaggi `DATABASE_URL assente` o `ingest error`. Avvia lo stack da `source/` con `docker compose` così le variabili d’ambiente sulle repliche sono coerenti.
+**Microservice: processing-api (backend, per replica)**
 
-Diagramma ad alto livello: `booklets/architecture.md` (Mermaid).
+| Method | URL | Description |
+|--------|-----|-------------|
+| GET | `/health` | Status, window size, persistence flag |
+| POST | `/internal/ingest` | Body: `sensor_id`, `timestamp`, `value` |
+| GET | `/internal/recent-events` | Last in-memory events (often via gateway) |
 
-### «Name or service not known» su `processing-2` (o 1)
+Stack: FastAPI, Uvicorn, NumPy FFT, asyncpg. Notable env: `DATABASE_URL`, `WINDOW_SIZE`, `DEDUP_BUCKET_SEC`, `MIN_CLASSIFY_HZ`, `SIMULATOR_BASE_URL`.
 
-Il simulatore può mandare **`SHUTDOWN`** su SSE: la replica interessata termina (`os._exit`). Il container resta **spento** finché non viene riavviato; gli altri servizi non risolvono più il nome Docker e in dashboard compare `[Errno -2] Name or service not known`. In `docker-compose.yml` le repliche hanno **`restart: unless-stopped`** così tornano su dopo un fault injection. Per prove senza spegnimenti: nel simulatore imposta `AUTO_SHUTDOWN_ENABLED=false` (vedi `docker-compose.yml`).
+---
+
+### 4.5 seismic-gateway
+
+- **Role:** FastAPI — list/filter events from DB, SSE stream of new rows, aggregate replica health, proxy to processing with failover.
+- **Persistence:** Stateless container; data only in PostgreSQL.
+- **Connections:** `db:5432`; HTTP to `processing-1:8000` and `processing-2:8000`.
+
+**Microservice: gateway-api (backend)**
+
+| Method | URL | Description |
+|--------|-----|-------------|
+| GET | `/health` | DB check + count of healthy processing replicas |
+| GET | `/api/replicas` | Per-replica reachability and health JSON |
+| GET | `/api/events` | Query: `limit`, optional `sensor_id` |
+| GET | `/api/events/stream` | SSE batches; optional `sensor_id` |
+| GET | `/api/processing/recent-events` | Proxy; header `X-Processing-Replica` |
+
+Env: `DATABASE_URL`, `PROCESSING_URLS`, `CORS_ORIGINS`, `SSE_POLL_SECONDS`.
+
+---
+
+### 4.6 seismic-web
+
+- **Role:** Multi-stage image: Vite/React build + nginx. Serves SPA on port 80; proxies `/api/*` to `gateway:8090` (buffering off for SSE).
+- **Persistence:** None (static assets in image).
+- **Connections:** Browser → nginx only; nginx → gateway for API.
+
+**Microservice: nginx-static-proxy (reverse proxy)**  
+Proxies `/api/*` to gateway; long read timeout for streams.
+
+| Method | URL | Description |
+|--------|-----|-------------|
+| GET | `/` | Dashboard SPA |
+| GET | `/api/*` | Forward to gateway |
+
+**Microservice: dashboard-ui (frontend)**  
+React + TypeScript. Docker build: empty `VITE_GATEWAY_URL` → relative `/api/...`. Uses EventSource on `/api/events/stream`, REST for initial events, polling for replicas and in-RAM replica events.
+
+| Page | Description | Related APIs |
+|------|-------------|--------------|
+| Main dashboard (`/`) | Replica chips, persisted events (SSE + REST), sensor filter, in-RAM events via gateway | gateway → DB and processing |
+
+---
+
+## 5. Run and URLs
+
+From directory `source/`:
+
+1. Import the simulator image (see `scripts/load-simulator-oci.sh` and `README.md`).
+2. Run: `docker compose up -d --build`
+
+| Purpose | URL |
+|---------|-----|
+| Dashboard | http://localhost:3000 |
+| Simulator (docs / health) | http://localhost:8080 |
+| Gateway (direct checks) | http://localhost:8090/health |
+
+Product requirements and user stories: **`input.md`**.
