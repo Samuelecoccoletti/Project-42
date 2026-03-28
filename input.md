@@ -1,4 +1,4 @@
-# Project — Advanced Programming Laboratory 2025/2026
+# Project42
 
 ## Repository layout
 
