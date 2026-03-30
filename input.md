@@ -32,7 +32,7 @@ The system uses a **distributed architecture**: a **neutral broker** receives da
 | **US-12** | Technical User | See health status of distributed nodes on dashboard | Distributed system status is monitored | **Must** |
 | **US-13** | Field Analyst | Show the sensor ID for every alert | The source channel of the detection is explicit | **Should** |
 | **US-14** | Deployment Engineer | Start the whole stack with a single `docker compose up` | Repeatable field-style deployment is ensured | **Must** |
-| **US-15** | Developer | Sliding window of samples per sensor | Frequency analysis is stable | **Must** ||
+| **US-15** | Developer | Sliding window of samples per sensor | Frequency analysis is stable | **Must** |
 
 Priority: Must = baseline required by the lab brief. Should on US-13 marks analyst-facing emphasis on sensor identity (no built-in geolocation in scope).
 

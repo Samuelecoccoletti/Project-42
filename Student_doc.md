@@ -10,13 +10,12 @@ Technical description of the deployed system (containers, ports, persistence, AP
 4. [Containers](#4-containers)  
 5. [Run and URLs](#5-run-and-urls)
 
----
 
 ## 1. System overview
 
 The stack ingests simulated seismic data from the course **simulator** (WebSocket per sensor). A **broker** discovers sensors over REST, subscribes to each stream, and fans out every sample over HTTP to **two processing replicas**. Each replica keeps a per-sensor sliding window, runs FFT, classifies by frequency band, and writes to **PostgreSQL** using an idempotent `dedup_key`. Replicas subscribe to the simulator SSE control API and exit on `SHUTDOWN`. A **gateway** exposes read APIs, SSE for new events, replica health, and proxies to processing with round-robin and failover. The **web** container serves the React dashboard and proxies `/api` to the gateway so the browser uses one origin on port 3000.
 
----
+
 
 ## 2. Container and port map
 
@@ -160,6 +159,8 @@ React + TypeScript. Docker build: empty `VITE_GATEWAY_URL` → relative `/api/..
 | Page | Description | Related APIs |
 |------|-------------|--------------|
 | Main dashboard (`/`) | Replica chips, persisted events (SSE + REST), sensor filter, in-RAM events via gateway | gateway → DB and processing |
+
+Lo‑fi wireframe (quattro sezioni: header, repliche, eventi DB, RAM): **`booklets/dashboard-mockup-lofi.png`** con note in **`booklets/dashboard-mockup.md`**.
 
 ---
 
