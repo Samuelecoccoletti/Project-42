@@ -1,5 +1,5 @@
 """
-Gateway: persistenza, stato repliche, routing con failover verso processing, SSE eventi.
+Gateway: persistence, replica status, failover routing to processing, SSE events.
 """
 
 from __future__ import annotations
@@ -34,13 +34,13 @@ PROCESSING_URLS = [
 
 pool: asyncpg.Pool | None = None
 
-# Round-robin sulle repliche; ogni richiesta parte dall’URL successivo, poi failover sul resto.
+# Round-robin across replicas; each request starts at the next URL, then failover on the rest.
 _rr_lock = threading.Lock()
 _rr_offset = 0
 
 
 def _processing_urls_rotated() -> list[str]:
-    """Ordina PROCESSING_URLS ruotando il punto di partenza (thread-safe)."""
+    """Return PROCESSING_URLS rotated so the start index advances (thread-safe)."""
     global _rr_offset
     if not PROCESSING_URLS:
         return []
@@ -70,9 +70,9 @@ async def _request_processing_failover(
     timeout: float = 5.0,
 ) -> tuple[Any, str]:
     """
-    Prova le repliche in ordine ruotato (round-robin): la prima che risponde 200 vince;
-    le altre sono tentate in failover se errore o status ≠ 200.
-    Ritorna (corpo JSON, base_url della replica che ha risposto).
+    Try replicas in rotated order (round-robin): first 200 wins;
+    others are tried on failover if error or status ≠ 200.
+    Returns (JSON body, base_url of the replica that responded).
     """
     last_err: str | None = None
     order = _processing_urls_rotated()
@@ -90,7 +90,7 @@ async def _request_processing_failover(
                 continue
     raise HTTPException(
         status_code=503,
-        detail="Nessuna replica processing disponibile: " + (last_err or "unknown"),
+        detail="No processing replica available: " + (last_err or "unknown"),
     )
 
 
@@ -154,10 +154,10 @@ async def replicas_status() -> list[dict[str, Any]]:
 
 @app.get("/api/processing/recent-events")
 async def proxy_processing_recent_events() -> JSONResponse:
-    """Inoltra a una replica online: memoria locale per-replica (debug / coerenza col lab)."""
+    """Forward to an online replica: per-replica local memory (debug / lab alignment)."""
     data, chosen_base = await _request_processing_failover("GET", "/internal/recent-events")
     if not isinstance(data, list):
-        raise HTTPException(502, detail="Risposta processing non valida")
+        raise HTTPException(502, detail="Invalid processing response")
     return JSONResponse(
         content=data,
         headers={"X-Processing-Replica": chosen_base},
@@ -199,11 +199,11 @@ async def list_events(
 
 @app.get("/api/events/stream")
 async def events_stream(
-    sensor_id: str | None = Query(default=None, description="Filtra solo questo sensore"),
+    sensor_id: str | None = Query(default=None, description="Filter to this sensor only"),
 ) -> StreamingResponse:
     """
-    SSE: nuovi eventi dal DB dopo la connessione (watermark su created_at).
-    Heartbeat ogni ciclo se non ci sono righe, per tenere viva la connessione.
+    SSE: new DB events after connect (watermark on created_at).
+    Sends a heartbeat each poll when there are no rows, to keep the connection alive.
     """
     assert pool is not None
     poll_s = float(os.environ.get("SSE_POLL_SECONDS", "2"))

@@ -1,7 +1,7 @@
 """
-Replica di processing: ingestisce campioni dal broker, finestra scorrevole,
-FFT, classificazione, persistenza idempotente su PostgreSQL (dedup_key),
-stream di controllo SSE dal simulatore.
+Processing replica: ingests samples from the broker, sliding window,
+FFT, classification, idempotent PostgreSQL persistence (dedup_key),
+SSE control stream from the simulator.
 """
 
 from __future__ import annotations
@@ -30,11 +30,11 @@ SIMULATOR_BASE = os.environ.get("SIMULATOR_BASE_URL", "http://localhost:8080").r
 REPLICA_ID = os.environ.get("REPLICA_ID", "1")
 SAMPLING_RATE_HZ = float(os.environ.get("SAMPLING_RATE_HZ", "20"))
 WINDOW_SIZE = int(os.environ.get("WINDOW_SIZE", "128"))
-# Allineato alle bande di classificazione: il picco FFT si cerca solo ≥ 0.5 Hz
-# (altrimenti il bin più energetico è spesso ~0.16 Hz e tutto finisce in «below_band»).
+# Matches classification bands: search FFT peak only ≥ 0.5 Hz
+# (otherwise the strongest bin is often ~0.16 Hz and everything lands in «below_band»).
 MIN_CLASSIFY_HZ = float(os.environ.get("MIN_CLASSIFY_HZ", "0.5"))
 ENERGY_THRESHOLD = float(os.environ.get("ENERGY_THRESHOLD", "0"))
-# Bucket temporale per dedup_key (secondi): repliche possono avere anchor_ts leggermente diversi (ordine HTTP/fan-out).
+# Time bucket for dedup_key (seconds): replicas may differ slightly on anchor_ts (HTTP/fan-out ordering).
 DEDUP_BUCKET_SEC = float(os.environ.get("DEDUP_BUCKET_SEC", "0.5"))
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 
@@ -49,7 +49,7 @@ class IngestBody(BaseModel):
 
 @dataclass
 class ReplicaState:
-    # (valore, timestamp ISO del campione dal simulatore)
+    # (value, ISO timestamp of the sample from the simulator)
     windows: dict[str, deque[tuple[float, str]]] = field(default_factory=dict)
     recent_events: list[dict[str, Any]] = field(default_factory=list)
 
@@ -58,7 +58,7 @@ state = ReplicaState()
 
 
 def _dedup_time_bucket(anchor_ts: str) -> str:
-    """Allinea repliche che emettono lo stesso evento con timestamp ultimo campione sfasato."""
+    """Align replicas that emit the same event with shifted last-sample timestamps."""
     s = anchor_ts.strip()
     if s.endswith("Z"):
         s = s[:-1] + "+00:00"
@@ -72,7 +72,7 @@ def _dedup_time_bucket(anchor_ts: str) -> str:
 def make_dedup_key(
     sensor_id: str, classification: str, dom_freq: float, anchor_ts: str
 ) -> str:
-    """Stesso evento logico cross-replica: bucket temporale + class + freq, non ISO al microsecondo."""
+    """Same logical event across replicas: time bucket + class + freq, not ISO to the microsecond."""
     bucket = _dedup_time_bucket(anchor_ts)
     s = f"{sensor_id}|{classification}|{round(dom_freq, 4)}|{bucket}"
     return hashlib.sha256(s.encode()).hexdigest()
@@ -142,7 +142,7 @@ def process_sample(sensor_id: str, value: float, sample_ts: str) -> dict[str, An
 
 
 def _parse_ts_for_pg(s: str) -> datetime:
-    """ISO-8601 → datetime timezone-aware per asyncpg/timestamptz."""
+    """ISO-8601 → timezone-aware datetime for asyncpg/timestamptz."""
     s = s.strip()
     if s.endswith("Z"):
         s = s[:-1] + "+00:00"
@@ -153,7 +153,7 @@ def _parse_ts_for_pg(s: str) -> datetime:
 
 
 async def persist_event(p: asyncpg.Pool, evt: dict[str, Any]) -> None:
-    """INSERT idempotente: seconda replica che calcola lo stesso evento viene ignorata."""
+    """Idempotent INSERT: second replica computing the same event is ignored."""
     sql = """
         INSERT INTO detected_events (
             dedup_key, sensor_id, classification, dominant_frequency_hz,
@@ -177,7 +177,7 @@ async def persist_event(p: asyncpg.Pool, evt: dict[str, Any]) -> None:
 
 async def sse_control_loop() -> None:
     url = f"{SIMULATOR_BASE}/api/control"
-    LOG.info("REPLICA %s: connessione SSE %s", REPLICA_ID, url)
+    LOG.info("REPLICA %s: SSE connection %s", REPLICA_ID, url)
     while True:
         try:
             async with httpx.AsyncClient(timeout=None) as client:
@@ -198,7 +198,7 @@ async def sse_control_loop() -> None:
                                 continue
                             if event_name == "command" and data.get("command") == "SHUTDOWN":
                                 LOG.warning(
-                                    "REPLICA %s: ricevuto SHUTDOWN — terminazione forzata",
+                                    "REPLICA %s: received SHUTDOWN — forced exit",
                                     REPLICA_ID,
                                 )
                                 os._exit(0)
@@ -206,7 +206,7 @@ async def sse_control_loop() -> None:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            LOG.error("SSE errore (retry tra 2s): %s", e)
+            LOG.error("SSE error (retry in 2s): %s", e)
             await asyncio.sleep(2)
 
 
@@ -215,9 +215,9 @@ async def lifespan(app: FastAPI):
     global pool
     if DATABASE_URL:
         pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3)
-        LOG.info("Pool PostgreSQL disponibile")
+        LOG.info("PostgreSQL pool available")
     else:
-        LOG.warning("DATABASE_URL assente — nessuna persistenza su DB")
+        LOG.warning("DATABASE_URL missing — no DB persistence")
     task = asyncio.create_task(sse_control_loop())
     yield
     task.cancel()
@@ -254,7 +254,7 @@ async def ingest(body: IngestBody) -> dict[str, str]:
                 await persist_event(pool, evt)
             else:
                 LOG.warning(
-                    "evento in RAM ma DATABASE_URL assente — nessun INSERT: %s",
+                    "event in RAM but DATABASE_URL missing — no INSERT: %s",
                     evt.get("dedup_key"),
                 )
     except Exception as e:

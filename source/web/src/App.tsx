@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 const rawGw = import.meta.env.VITE_GATEWAY_URL as string | undefined;
-/** Vuoto = URL relativi `/api/...` (proxy Vite in dev, nginx nel container `web`). */
+/** Empty string = relative `/api/...` URLs (Vite proxy in dev, nginx in `web` container). */
 const GW =
   rawGw !== undefined && String(rawGw).trim() !== ""
     ? String(rawGw).replace(/\/$/, "")
@@ -45,12 +45,12 @@ export function App() {
   const loadReplicas = useCallback(async () => {
     try {
       const rRes = await fetch(`${GW}/api/replicas`);
-      if (!rRes.ok) throw new Error(`repliche HTTP ${rRes.status}`);
+      if (!rRes.ok) throw new Error(`replicas HTTP ${rRes.status}`);
       setReplicas(await rRes.json());
     } catch (e) {
       const hint = GW || (typeof window !== "undefined" ? window.location.origin : "");
       setErr(
-        `API non raggiungibile (${hint}). Avvia lo stack da source/ e ricarica: ${String(e)}`,
+        `API unreachable (${hint}). Start the stack from source/ and reload: ${String(e)}`,
       );
     }
   }, []);
@@ -61,12 +61,12 @@ export function App() {
       q.set("limit", "100");
       if (sensorFilter.trim()) q.set("sensor_id", sensorFilter.trim());
       const eRes = await fetch(`${GW}/api/events?${q}`);
-      if (!eRes.ok) throw new Error(`eventi HTTP ${eRes.status}`);
+      if (!eRes.ok) throw new Error(`events HTTP ${eRes.status}`);
       setEvents(await eRes.json());
       setErr(null);
     } catch (e) {
       const hint = GW || (typeof window !== "undefined" ? window.location.origin : "");
-      setErr(`API non raggiungibile (${hint}): ${String(e)}`);
+      setErr(`API unreachable (${hint}): ${String(e)}`);
     }
   }, [sensorFilter]);
 
@@ -137,7 +137,7 @@ export function App() {
       };
       inst.onerror = () => {
         if (cancelled) return;
-        // Safari può emettere onerror anche con stream ancora aperto; non chiudere subito.
+        // Safari may fire onerror while the stream is still open; do not close immediately.
         if (errDebounce !== undefined) window.clearTimeout(errDebounce);
         errDebounce = window.setTimeout(() => {
           errDebounce = undefined;
@@ -164,11 +164,11 @@ export function App() {
       <header>
         <h1>Seismic — dashboard</h1>
         <p className="muted">
-          Eventi PostgreSQL: <strong>SSE</strong>{" "}
+          PostgreSQL events: <strong>SSE</strong>{" "}
           {streamOk === false ? (
-            <span className="error">(stream in errore — usa &quot;Aggiorna&quot;)</span>
+            <span className="error">(stream error — use &quot;Refresh now&quot;)</span>
           ) : (
-            <span>+ caricamento iniziale</span>
+            <span>+ initial load</span>
           )}
           .{" "}
           {GW ? (
@@ -177,7 +177,7 @@ export function App() {
             </>
           ) : (
             <>
-              API su <strong>stesso origin</strong> (nginx/Vite → gateway). Test diretto:{" "}
+              API on <strong>same origin</strong> (nginx/Vite → gateway). Direct test:{" "}
               <a href="http://localhost:8090/health">localhost:8090</a>
             </>
           )}
@@ -185,7 +185,7 @@ export function App() {
       </header>
 
       <section className="panel">
-        <h2>Repliche processing</h2>
+        <h2>Processing replicas</h2>
         <div className="replicas">
           {replicas.map((r) => (
             <div key={r.url} className={`chip ${r.ok ? "ok" : "bad"}`}>
@@ -194,29 +194,29 @@ export function App() {
             </div>
           ))}
           {replicas.length === 0 && (
-            <span className="muted">Nessun dato repliche.</span>
+            <span className="muted">No replica data yet.</span>
           )}
         </div>
         <p className="muted small">
-          Il gateway usa round-robin + failover su{" "}
+          The gateway uses round-robin + failover on{" "}
           <code>/api/processing/recent-events</code> (header{" "}
           <code>X-Processing-Replica</code>).
         </p>
       </section>
 
       <section className="panel">
-        <h2>Eventi persistiti (PostgreSQL)</h2>
+        <h2>Persisted events (PostgreSQL)</h2>
         <div className="row">
           <label>
-            Filtra sensore{" "}
+            Filter sensor{" "}
             <input
               value={sensorFilter}
               onChange={(e) => setSensorFilter(e.target.value)}
-              placeholder="es. sensor-01"
+              placeholder="e.g. sensor-01"
             />
           </label>
           <button type="button" onClick={() => void loadEventsOnce()}>
-            Aggiorna ora (REST)
+            Refresh now (REST)
           </button>
         </div>
         {err && <p className="error">{err}</p>}
@@ -224,9 +224,9 @@ export function App() {
           <table>
             <thead>
               <tr>
-                <th>Tempo (UTC)</th>
-                <th>Sensore</th>
-                <th>Classe</th>
+                <th>Time (UTC)</th>
+                <th>Sensor</th>
+                <th>Class</th>
                 <th>Freq Hz</th>
                 <th>Replica</th>
               </tr>
@@ -244,20 +244,20 @@ export function App() {
             </tbody>
           </table>
           {events.length === 0 && !err && (
-            <p className="muted">Nessun evento in tabella (o DB ancora vuoto).</p>
+            <p className="muted">No events in table (or DB still empty).</p>
           )}
         </div>
       </section>
 
       <section className="panel">
-        <h2>Ultime classificazioni in RAM (replica via gateway)</h2>
+        <h2>Latest in-RAM classifications (replica via gateway)</h2>
         <p className="muted small">
-          Dati dalla RAM della replica scelta dal gateway (round-robin); non
-          sostituisce il DB.
+          Data from the replica chosen by the gateway (round-robin); does not replace
+          the DB.
           {ramSourceUrl && (
             <>
               {" "}
-              <strong>Origine ultima richiesta:</strong>{" "}
+              <strong>Last request source:</strong>{" "}
               <code>{ramSourceUrl.replace(/^https?:\/\//, "")}</code>
             </>
           )}
@@ -266,9 +266,9 @@ export function App() {
           <table>
             <thead>
               <tr>
-                <th>Tempo</th>
-                <th>Sensore</th>
-                <th>Classe</th>
+                <th>Time</th>
+                <th>Sensor</th>
+                <th>Class</th>
                 <th>Freq</th>
                 <th>R</th>
               </tr>
@@ -286,7 +286,7 @@ export function App() {
             </tbody>
           </table>
           {replicaEvents.length === 0 && (
-            <p className="muted">Nessun dato o repliche non raggiungibili.</p>
+            <p className="muted">No data or replicas unreachable.</p>
           )}
         </div>
       </section>

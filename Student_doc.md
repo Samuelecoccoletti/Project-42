@@ -160,7 +160,7 @@ React + TypeScript. Docker build: empty `VITE_GATEWAY_URL` → relative `/api/..
 |------|-------------|--------------|
 | Main dashboard (`/`) | Replica chips, persisted events (SSE + REST), sensor filter, in-RAM events via gateway | gateway → DB and processing |
 
-Lo‑fi wireframe (quattro sezioni: header, repliche, eventi DB, RAM): **`booklets/dashboard-mockup-lofi.png`** con note in **`booklets/dashboard-mockup.md`**.
+Lo‑fi wireframe (four sections: header, replicas, DB events, RAM): **`booklets/dashboard-mockup-lofi.png`** with notes in **`booklets/dashboard-mockup.md`**.
 
 ---
 

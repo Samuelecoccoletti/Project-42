@@ -1,7 +1,7 @@
 """
-Broker: discovery + WebSocket dal simulatore, fan-out HTTP verso le repliche processing.
+Broker: simulator discovery + WebSocket ingestion, HTTP fan-out to processing replicas.
 
-Se PROCESSING_URLS è vuoto, si comporta come probe (solo log).
+If PROCESSING_URLS is empty, runs in probe mode (logging only).
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ LOG = logging.getLogger("broker")
 
 
 def _env_optional_float(name: str, default: str | None) -> float | None:
-    """Se default è None e la var non è impostata → None (disattiva opzione)."""
+    """If default is None and the env var is unset → None (disables the option)."""
     raw = os.environ.get(name)
     if raw is None:
         return None if default is None else float(default)
@@ -31,9 +31,9 @@ def _env_optional_float(name: str, default: str | None) -> float | None:
     return float(raw)
 
 
-# Con 12 WebSocket + fan-out HTTP, l’event loop può ritardare i ping del *client*:
-# la libreria chiude con "keepalive ping timeout". Default: nessun ping inviato dal
-# client (il flusso di campioni tiene viva la connessione). Riattiva con WS_PING_INTERVAL=30
+# With many WebSockets + HTTP fan-out, the event loop can delay *client* pings:
+# the library then closes with "keepalive ping timeout". Default: no client ping
+# (the sample stream keeps the connection alive). Re-enable with WS_PING_INTERVAL=30
 WS_PING_INTERVAL = _env_optional_float("WS_PING_INTERVAL", None)
 WS_PING_TIMEOUT = _env_optional_float("WS_PING_TIMEOUT", None)
 
@@ -42,7 +42,7 @@ MAX_SAMPLES = int(os.environ.get("MAX_SAMPLES", "0"))
 SENSOR_ID = os.environ.get("SENSOR_ID", "").strip()
 ALL_SENSORS = os.environ.get("ALL_SENSORS", "true").lower() in ("1", "true", "yes", "on")
 
-# Es: http://processing-1:8000,http://processing-2:8000
+# e.g. http://processing-1:8000,http://processing-2:8000
 PROCESSING_URLS = [
     u.strip().rstrip("/")
     for u in os.environ.get("PROCESSING_URLS", "").split(",")
@@ -55,7 +55,7 @@ def http_to_ws_base(http_base: str) -> str:
         return "wss://" + http_base[len("https://") :]
     if http_base.startswith("http://"):
         return "ws://" + http_base[len("http://") :]
-    raise ValueError(f"URL non supportato: {http_base}")
+    raise ValueError(f"Unsupported URL: {http_base}")
 
 
 async def fetch_sensors(client: httpx.AsyncClient) -> list[dict[str, Any]]:
@@ -63,7 +63,7 @@ async def fetch_sensors(client: httpx.AsyncClient) -> list[dict[str, Any]]:
     r.raise_for_status()
     data = r.json()
     if not isinstance(data, list):
-        raise TypeError("Risposta /api/devices/ attesa come lista")
+        raise TypeError("Expected /api/devices/ response to be a list")
     return data
 
 
@@ -72,7 +72,7 @@ async def fan_out(
     sensor_id: str,
     payload: dict[str, Any],
 ) -> None:
-    """Invia lo stesso campione a tutte le repliche (broadcast)."""
+    """Send the same sample to every replica (broadcast)."""
     body = {"sensor_id": sensor_id, **payload}
     if not PROCESSING_URLS:
         LOG.debug("[%s] %s", sensor_id, body)
@@ -84,7 +84,7 @@ async def fan_out(
             r = await http_client.post(url, json=body)
             r.raise_for_status()
         except Exception as e:
-            LOG.warning("ingest fallito verso %s: %s", base, e)
+            LOG.warning("ingest failed toward %s: %s", base, e)
 
     await asyncio.gather(*[post_one(base) for base in PROCESSING_URLS])
 
@@ -118,14 +118,14 @@ async def read_sensor_stream(
                     else:
                         LOG.info("[%s] %s", label, payload)
                     if MAX_SAMPLES and n_total >= MAX_SAMPLES:
-                        LOG.info("MAX_SAMPLES=%s raggiunto per %s", MAX_SAMPLES, label)
+                        LOG.info("MAX_SAMPLES=%s reached for %s", MAX_SAMPLES, label)
                         return
         except ConnectionClosed as e:
             LOG.warning(
-                "WS %s chiuso (%s), riconnessione tra %ss...", label, e, backoff
+                "WS %s closed (%s), reconnecting in %ss...", label, e, backoff
             )
         except OSError as e:
-            LOG.warning("%s errore rete (%s), retry tra %ss...", label, e, backoff)
+            LOG.warning("%s network error (%s), retry in %ss...", label, e, backoff)
         await asyncio.sleep(backoff)
         backoff = min(backoff * 2, 60)
 
@@ -139,11 +139,11 @@ async def main() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     if not PROCESSING_URLS:
         LOG.warning(
-            "PROCESSING_URLS vuoto — modalità probe (solo log). "
-            "Imposta gli URL delle repliche per il fan-out."
+            "PROCESSING_URLS empty — probe mode (logging only). "
+            "Set replica URLs for fan-out."
         )
     else:
-        LOG.info("Fan-out verso %s", PROCESSING_URLS)
+        LOG.info("Fan-out to %s", PROCESSING_URLS)
 
     async with httpx.AsyncClient(timeout=30.0) as discover_client:
         sensors = await fetch_sensors(discover_client)
@@ -151,10 +151,10 @@ async def main() -> None:
     if SENSOR_ID:
         sensors = [s for s in sensors if s.get("id") == SENSOR_ID]
         if not sensors:
-            LOG.error("Nessun sensore con id=%r", SENSOR_ID)
+            LOG.error("No sensor with id=%r", SENSOR_ID)
             sys.exit(1)
     elif not sensors:
-        LOG.error("Nessun sensore restituito dal simulatore")
+        LOG.error("No sensors returned by the simulator")
         sys.exit(1)
     elif not ALL_SENSORS:
         sensors = sensors[:1]
@@ -164,7 +164,7 @@ async def main() -> None:
         sid = s.get("id", "?")
         path = s.get("websocket_url")
         if not path:
-            LOG.error("Sensore %s senza websocket_url", sid)
+            LOG.error("Sensor %s has no websocket_url", sid)
             continue
         name = s.get("name", sid)
         tasks.append((path, sid, f"{sid} {name}"))

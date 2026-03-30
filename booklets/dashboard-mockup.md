@@ -1,14 +1,14 @@
-# Dashboard SEISMIC — mockup lo‑fi
+# SEISMIC dashboard — lo-fi mockup
 
-Il layout a quattro blocchi dello schizzo è **allineato** all’implementazione attuale:
+The four-block sketch layout **matches** the current implementation:
 
-| Blocco mockup | Implementazione (`source/web`) |
-|---------------|-------------------------------|
-| **SEISMIC – Dashboard** | Titolo / intestazione della pagina |
-| **REPLICHE – STATUS** | Chip / stato repliche (polling gateway) |
-| **EVENTI – DATABASE** | Tabella eventi persistiti (REST + SSE) |
-| **RAM – ULTIME CLASSIFICAZIONI** | Tabella classificazioni in RAM per replica (gateway) |
+| Mockup block | Implementation (`source/web`) |
+|--------------|------------------------------|
+| **SEISMIC – Dashboard** | Page title / header |
+| **REPLICAS – STATUS** | Replica chips / status (gateway polling) |
+| **EVENTS – DATABASE** | Persisted events table (REST + SSE) |
+| **RAM – LATEST CLASSIFICATIONS** | In-RAM classifications per replica (gateway) |
 
-**File immagine:** [`dashboard-mockup-lofi.png`](dashboard-mockup-lofi.png) — 
+**Image file:** [`dashboard-mockup-lofi.png`](dashboard-mockup-lofi.png) — reference wireframe in the repo; you can replace it with your own exported PNG (same filename) if you want to version the original sketch.
 
-Colonne tabella attese: `tempo`, `sensor`, `class`, `freq`, `replica` — coerenti con i campi esposti dall’API e dalla UI.
+Expected table columns: `time`, `sensor`, `class`, `freq`, `replica` — aligned with API and UI fields.

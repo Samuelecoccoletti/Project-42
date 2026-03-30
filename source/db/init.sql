@@ -1,4 +1,4 @@
--- Persistenza eventi classificati (idempotenza su dedup_key)
+-- Classified event persistence (idempotency on dedup_key)
 CREATE TABLE IF NOT EXISTS detected_events (
     id              BIGSERIAL PRIMARY KEY,
     dedup_key       CHAR(64) NOT NULL UNIQUE,

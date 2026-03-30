@@ -1,8 +1,8 @@
-# Avvio: cd source && docker compose up --build
-# Simulatore: richiede immagine locale (scripts/load-simulator-oci.sh)
+# Run: cd source && docker compose up --build
+# Simulator: requires local image (scripts/load-simulator-oci.sh)
 #
-# Healthcheck: evita che il broker parta prima che processing-1/2 siano
-# registrati in DNS sulla rete compose (altrimenti: "Name or service not known").
+# Healthcheck: prevents the broker from starting before processing-1/2 are
+# registered on the compose network DNS (otherwise: "Name or service not known").
 
 services:
   db:
@@ -38,8 +38,8 @@ services:
   processing-1:
     build: ./processing
     container_name: seismic-processing-1
-    # Il simulatore può inviare SHUTDOWN (SSE): la replica esce. Senza restart il DNS
-    # «processing-N» sparisce e il gateway mostra «Name or service not known».
+    # The simulator may send SHUTDOWN (SSE): the replica exits. Without restart, DNS for
+    # «processing-N» disappears and the gateway shows «Name or service not known».
     restart: unless-stopped
     environment:
       REPLICA_ID: "1"

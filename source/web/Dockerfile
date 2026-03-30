@@ -3,7 +3,7 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install
 COPY . .
-# Vuoto = API via path relativi /api/... (proxy nginx → gateway). Evita fetch cross-origin verso :8090.
+# Empty = relative /api/... paths (nginx → gateway proxy). Avoids cross-origin fetch to :8090.
 ARG VITE_GATEWAY_URL=
 ENV VITE_GATEWAY_URL=$VITE_GATEWAY_URL
 RUN npm run build

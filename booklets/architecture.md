@@ -1,10 +1,10 @@
-# Diagramma architettura (Project-42)
+# Architecture diagram (Project-42)
 
-## Vista logica
+## Logical view
 
 ```mermaid
 flowchart LR
-  subgraph Sim["Simulatore (fornito)"]
+  subgraph Sim["Simulator (provided)"]
     DEV["/api/devices"]
     WS["WebSocket /api/device/.../ws"]
     SSE["SSE /api/control"]
@@ -15,7 +15,7 @@ flowchart LR
   P2[Processing 2]
   DB[(PostgreSQL)]
   G[Gateway]
-  W[Dashboard web]
+  W[Web dashboard]
 
   DEV --> B
   WS --> B
@@ -31,11 +31,11 @@ flowchart LR
   W --> G
 ```
 
-### Flussi
+### Flows
 
-1. **Ingestione**: broker apre N WebSocket verso il simulatore e fa **fan-out** HTTP `POST /internal/ingest` verso ogni replica.
-2. **Elaborazione**: ogni replica mantiene finestra per sensore, FFT, classificazione; scrive su DB con `ON CONFLICT DO NOTHING`.
-3. **Fault injection**: SSE `SHUTDOWN` chiude **una** replica alla volta.
-4. **Presentazione**: il browser parla solo con **gateway** (REST + SSE); il gateway interroga DB e, con failover, le repliche per dati in RAM.
+1. **Ingestion**: the broker opens N WebSockets to the simulator and **fan-out** HTTP `POST /internal/ingest` to every replica.
+2. **Processing**: each replica keeps a per-sensor window, FFT, classification; writes to the DB with `ON CONFLICT DO NOTHING`.
+3. **Fault injection**: SSE `SHUTDOWN` stops **one** replica at a time.
+4. **Presentation**: the browser talks only to the **gateway** (REST + SSE); the gateway queries the DB and, with failover, replicas for in-RAM data.
 
-*(Esportare in PNG da GitHub / Mermaid Live Editor per le slide.)*
+*(Export to PNG from GitHub / Mermaid Live Editor for slides.)*
