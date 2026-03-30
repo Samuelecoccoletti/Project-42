@@ -1,48 +1,63 @@
-# Progetto — Laboratorio Advanced Programming 2025/2026
+# Project42
 
-## Panoramica
+## Repository layout
 
-Sistema distribuito per ingestione dati sismici dal **simulatore** (container fornito), **broker** con fan-out WebSocket → HTTP, **repliche di processing** con finestra scorrevole + FFT e classificazione per bande di frequenza, **PostgreSQL** con deduplicazione (`dedup_key`), **gateway** con failover e SSE, **dashboard** React.
-
-Repository: `source/` (codice, Docker), `booklets/` (slide/diagrammi), questo file e `Student_doc.md`.
+Distributed stack: `source/` (code, Docker), `booklets/` (slides, diagrams), this file and `Student_doc.md`.
 
 ---
 
-## User stories
+# SYSTEM DESCRIPTION
 
-*(Numerare e completare con il gruppo; sotto esempi tipici — adattare al vostro backlog.)*
+Project42 is a strategic surveillance platform for real-time monitoring of global seismic signals. Its purpose is to distinguish natural events from man-made threats, such as conventional or nuclear-like activity.
 
-| ID | Come … | Voglio … | Così che … | Priorità |
-|----|---------|----------|------------|----------|
-| US-01 | operatore | vedere lo stato delle repliche processing | capisco se il sistema è degradato | Must |
-| US-02 | operatore | vedere gli eventi classificati persistiti | posso fare analisi storica | Must |
-| US-03 | operatore | filtrare eventi per sensore | mi concentro su un’area | Should |
-| US-04 | sistema | ignorare duplicati tra repliche sul DB | i dati restano coerenti | Must |
-| US-05 | operatore | usare un’unica URL gateway | non devo conoscere le singole repliche | Should |
-| US-06 | istruttore | iniettare eventi dal simulatore | posso testare classificazione | Could |
-| US-07 | *(aggiungere)* | | | |
+The system uses a **distributed architecture**: a **neutral broker** receives data from sensors and forwards it to **replicated processing nodes**. Those nodes analyse signals with **FFT** (Fast Fourier Transform). The design targets **resilience** when compute nodes fail (e.g. simulated shutdown), so monitoring can continue while replicas restart or degrade gracefully behind the gateway.
 
 ---
 
-## Schema eventi standard (persistenza)
+# USER STORIES 
 
-Allineato alla tabella `detected_events` e alle API gateway. Campi logici:
+| ID | Role (Persona) | Requirement (I want...) | Motivation (So that...) | Priority |
+| :--- | :--- | :--- | :--- | :--- |
+| **US-01** | Broker (Ingestion) | Open WebSocket connections to each sensor stream | Real-time samples are received for downstream processing | **Must** |
+| **US-02** | Neutral Broker | Forward incoming samples to multiple processing nodes | Intelligence is not analysed in the neutral routing tier | **Must** |
+| **US-03** | Data Analyst | Compute the dominant frequency with FFT | The nature of the vibration can be assessed | **Must** |
+| **US-04** | Military Commander | Classify signals 0.5 ≤ f < 3.0 Hz as earthquake-like | Natural seismic activity can be separated from threats | **Must** |
+| **US-05** | Defence Operator | Classify signals 3.0 ≤ f < 8.0 Hz as conventional explosion | Nearby units can be alerted | **Must** |
+| **US-06** | High Command | Immediate nuclear-like alert for frequency ≥ 8.0 Hz | Emergency defensive protocols can be considered | **Must** |
+| **US-07** | IT Administrator | Replicate processing service across two containers | System keeps operating if one node is lost or shut down | **Must** |
+| **US-08** | Database Steward | Idempotent persistence | Duplicate detections from different replicas are stored only once | **Must** |
+| **US-09** | Command-centre Op. | Real-time dashboard showing recent detected events | Recent events and their classification are visible | **Must** |
+| **US-10** | Strategic Researcher | Historical log of persisted threats | Patterns in activity can be reviewed | **Must** |
+| **US-11** | Security Officer | Replicas to react to a SHUTDOWN command over SSE | Simulated node failure matches the lab contract | **Must** |
+| **US-12** | Technical User | See health status of distributed nodes on dashboard | Distributed system status is monitored | **Must** |
+| **US-13** | Field Analyst | Show the sensor ID for every alert | The source channel of the detection is explicit | **Should** |
+| **US-14** | Deployment Engineer | Start the whole stack with a single `docker compose up` | Repeatable field-style deployment is ensured | **Must** |
+| **US-15** | Developer | Sliding window of samples per sensor | Frequency analysis is stable | **Must** ||
 
-| Campo | Tipo | Note |
-|-------|------|------|
-| `dedup_key` | string (64 hex) | Unicità logica cross-replica |
-| `sensor_id` | string | Es. `sensor-01` |
-| `classification` | enum | `earthquake`, `conventional_explosion`, `nuclear_like`, … |
-| `dominant_frequency_hz` | number | Da FFT |
-| `energy` | number \| null | Energia spettrale (opzionale) |
-| `detected_at` | ISO-8601 UTC | Ancora temporale del campione |
-| `replica_id` | string | Replica che ha scritto per prima |
+Priority: Must = baseline required by the lab brief. Should on US-13 marks analyst-facing emphasis on sensor identity (no built-in geolocation in scope).
 
-### Esempio JSON (risposta API)
+---
+
+## Standard persisted event schema
+
+Aligned with table `detected_events` and gateway APIs.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `dedup_key` | string (64 hex) | Logical uniqueness across replicas |
+| `sensor_id` | string | e.g. `sensor-01` |
+| `classification` | string | `earthquake`, `conventional_explosion`, `nuclear_like`, … |
+| `dominant_frequency_hz` | number | From FFT |
+| `energy` | number \| null | Spectral energy (optional) |
+| `detected_at` | ISO-8601 UTC | Anchor timestamp of the sample |
+| `replica_id` | string | Replica that won the insert race |
+| `created_at` | ISO-8601 UTC | Row insert time (set by the database) |
+
+### Example JSON (API response)
 
 ```json
 {
-  "dedup_key": "a1b2…",
+  "dedup_key": "a1b2c3…",
   "sensor_id": "sensor-11",
   "classification": "conventional_explosion",
   "dominant_frequency_hz": 6.719,
@@ -55,22 +70,22 @@ Allineato alla tabella `detected_events` e alle API gateway. Campi logici:
 
 ---
 
-## Modello di regole (classificazione)
+## Classification rule model
 
-Bande di frequenza dominante (dal testo d’esame, valori fittizi):
+Dominant-frequency bands (exam brief; fictional thresholds):
 
-| Classe | Intervallo \(f\) (Hz) |
-|--------|------------------------|
-| Terremoto | \(0.5 \leq f < 3.0\) |
-| Esplosione convenzionale | \(3.0 \leq f < 8.0\) |
+| Class | Interval \(f\) (Hz) |
+|-------|---------------------|
+| Earthquake | \(0.5 \leq f < 3.0\) |
+| Conventional explosion | \(3.0 \leq f < 8.0\) |
 | Nuclear-like | \(f \geq 8.0\) |
-| Sotto banda / ignoto | \(f < 0.5\) o non classificato |
+| Below band / ignored | \(f < 0.5\) or unclassified |
 
-Regole di deduplicazione: stessa `dedup_key` = stesso `(sensor_id, classificazione, freq arrotondata, bucket temporale ~0,5 s sull’istante dell’ultimo campione)` per allineare le repliche (vedi `DEDUP_BUCKET_SEC` nel processing).
+Deduplication: same `dedup_key` corresponds to the same logical event across replicas (sensor, class, rounded frequency, time bucket on the last sample; see `DEDUP_BUCKET_SEC` in processing).
 
 ---
 
-## Note di gruppo
+## Group metadata
 
-- **Leader repo / matricola:** *(da compilare)*  
-- **Componenti:** *(nomi)*
+- **Repository lead / student ID:** 2092748  
+- **Team members:** Project42 — Samuele Coccoletti and Chiara Andreoli
