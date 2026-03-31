@@ -7,6 +7,10 @@ const GW =
     ? String(rawGw).replace(/\/$/, "")
     : "";
 
+/** Official product titles (keep in sync with `index.html`). */
+export const PRODUCT_TITLE = "SEISMIC INTELLIGENCE & EARLY WARNING SYSTEM";
+export const PRODUCT_SUBTITLE = "Strategic Command Console - Zone Neutral";
+
 export type EventRow = {
   dedup_key: string;
   sensor_id: string;
@@ -179,7 +183,8 @@ export function App() {
   return (
     <div className="app">
       <header>
-        <h1>Seismic — dashboard</h1>
+        <h1 className="product-title">{PRODUCT_TITLE}</h1>
+        <p className="product-subtitle">{PRODUCT_SUBTITLE}</p>
         <p className="muted">
           PostgreSQL events: <strong>SSE</strong>{" "}
           {streamOk === false ? (
