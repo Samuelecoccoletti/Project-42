@@ -116,6 +116,67 @@ button:hover {
   color: #f85149;
 }
 
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0 0 0.75rem;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.12rem 0.5rem;
+  border: 1px solid #30363d;
+  font-size: 0.82rem;
+  font-family: ui-monospace, monospace;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.pill.cls {
+  background: #0d1117;
+}
+
+.pill.cls.nuclear_like {
+  background: #3a0a0a;
+  border-color: #b42318;
+  color: #ffd6d6;
+}
+
+.pill.cls.conventional_explosion {
+  background: #3a230a;
+  border-color: #d97706;
+  color: #ffe8c7;
+}
+
+.pill.cls.earthquake {
+  background: #0f2a3d;
+  border-color: #2563eb;
+  color: #d6e7ff;
+}
+
+tr.evt.nuclear_like td {
+  background: rgba(180, 35, 24, 0.12);
+}
+
+tr.evt.conventional_explosion td {
+  background: rgba(217, 119, 6, 0.10);
+}
+
+tr.evt.earthquake td {
+  background: rgba(37, 99, 235, 0.10);
+}
+
+.evt td {
+  transition: background-color 120ms ease-in-out;
+}
+
+.evt:hover td {
+  background: rgba(124, 179, 255, 0.08);
+}
+
 .table-wrap {
   overflow-x: auto;
 }

@@ -25,6 +25,23 @@ export type ReplicaRow = {
   error?: string;
 };
 
+function classificationKey(raw: string | null | undefined): string {
+  return String(raw ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function classificationLabel(raw: string): string {
+  const k = classificationKey(raw);
+  if (k === "nuclear_like") return "Nuclear-like";
+  if (k === "conventional_explosion") return "Conventional explosion";
+  if (k === "earthquake") return "Earthquake";
+  if (!k) return "Unknown";
+  return raw;
+}
+
 function mergeEvents(prev: EventRow[], batch: EventRow[]): EventRow[] {
   const map = new Map(prev.map((e) => [e.dedup_key, e]));
   for (const e of batch) map.set(e.dedup_key, e);
@@ -206,6 +223,11 @@ export function App() {
 
       <section className="panel">
         <h2>Persisted events (PostgreSQL)</h2>
+        <div className="legend">
+          <span className="pill cls nuclear_like">Nuclear-like</span>
+          <span className="pill cls conventional_explosion">Conventional</span>
+          <span className="pill cls earthquake">Earthquake</span>
+        </div>
         <div className="row">
           <label>
             Filter sensor{" "}
@@ -233,10 +255,14 @@ export function App() {
             </thead>
             <tbody>
               {events.map((ev) => (
-                <tr key={ev.dedup_key}>
+                <tr key={ev.dedup_key} className={`evt ${classificationKey(ev.classification)}`}>
                   <td>{ev.detected_at}</td>
                   <td>{ev.sensor_id}</td>
-                  <td>{ev.classification}</td>
+                  <td>
+                    <span className={`pill cls ${classificationKey(ev.classification)}`}>
+                      {classificationLabel(ev.classification)}
+                    </span>
+                  </td>
                   <td>{ev.dominant_frequency_hz.toFixed(4)}</td>
                   <td>{ev.replica_id}</td>
                 </tr>
@@ -275,10 +301,17 @@ export function App() {
             </thead>
             <tbody>
               {replicaEvents.slice(-12).map((ev) => (
-                <tr key={`${ev.dedup_key}-ram`}>
+                <tr
+                  key={`${ev.dedup_key}-ram`}
+                  className={`evt ${classificationKey(ev.classification)}`}
+                >
                   <td>{ev.detected_at}</td>
                   <td>{ev.sensor_id}</td>
-                  <td>{ev.classification}</td>
+                  <td>
+                    <span className={`pill cls ${classificationKey(ev.classification)}`}>
+                      {classificationLabel(ev.classification)}
+                    </span>
+                  </td>
                   <td>{ev.dominant_frequency_hz?.toFixed?.(3) ?? ev.dominant_frequency_hz}</td>
                   <td>{ev.replica_id}</td>
                 </tr>
